@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Logback 日志配置。
+
+    为什么用 Logback 而不是 log4j：
+      实验一用 log4j 1.2.17。本项目改用 logback 1.2.13，原因：
+      ① log4j 1.x 已停止维护，存在已知安全问题
+      ② logback 是 SLF4J 的原生实现，与 Spring 5.x 的日志体系（spring-jcl → SLF4J）天然打通
+      ③ 若继续用 log4j 1.x 需要额外的 slf4j-log4j12 桥接包，反而更绕
+
+    日志分级策略（对应《企业开发规范清单》6-1 条）：
+      ERROR → 系统异常、需人工介入的问题（一定是"出事了"）
+      WARN  → 业务异常（状态非法、越权拦截）——这是预期内的失败
+      INFO  → 关键业务动作（提交、审核、发布）与接口出入参摘要
+      DEBUG → 开发期调试细节（含 MyBatis 执行的 SQL），生产环境关闭
+
+    ⚠️ 注意日志文件路径：logs/ 已被 .gitignore 排除，不会入库。
+-->
+<configuration scan="true" scanPeriod="60 seconds">
+
+    <!-- ==================== 属性定义 ==================== -->
+    <property name="LOG_PATH" value="./logs"/>
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{40} - %msg%n"/>
+    <!-- 带颜色的控制台格式（仅在支持 ANSI 的终端生效，IDEA 控制台支持） -->
+    <property name="CONSOLE_PATTERN"
+              value="%d{HH:mm:ss.SSS} %highlight(%-5level) %cyan(%logger{36}) - %msg%n"/>
+
+    <!-- ==================== 1. 控制台输出 ==================== -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${CONSOLE_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 2. 全量日志文件（按天滚动） ==================== -->
+    <appender name="FILE_ALL" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/cms.log</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- 每天一个文件，历史文件压缩 -->
+            <fileNamePattern>${LOG_PATH}/cms.%d{yyyy-MM-dd}.log.gz</fileNamePattern>
+            <!-- 保留 30 天 -->
+            <maxHistory>30</maxHistory>
+            <!-- 单文件上限 100MB（超过则当天就滚动） -->
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <!-- ==================== 3. 错误日志单独文件 ==================== -->
+    <!--
+        为什么单独一个 ERROR 文件：
+        答辩演示时若出问题，直接看 cms-error.log 最快，不用在全量日志里翻。
+    -->
+    <appender name="FILE_ERROR" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/cms-error.log</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/cms-error.%d{yyyy-MM-dd}.log.gz</fileNamePattern>
+            <maxHistory>30</maxHistory>
+        </rollingPolicy>
+    </appender>
+
+    <!-- ==================== 4. 业务日志单独文件 ==================== -->
+    <!--
+        审计/归档用：只记录本项目的业务日志（业务动作、审核流水、越权拦截）。
+        这与 sys_oper_log 表形成互补：表里存结构化的，文件里存可读的文本上下文。
+    -->
+    <appender name="FILE_BIZ" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/cms-business.log</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/cms-business.%d{yyyy-MM-dd}.log.gz</fileNamePattern>
+            <maxHistory>30</maxHistory>
+        </rollingPolicy>
+    </appender>
+
+    <!-- ==================== Logger 配置 ==================== -->
+
+    <!--
+        本项目日志。
+        level=DEBUG：开发期需要看细节（SQL、参数、状态流转）。
+        生产环境应改为 INFO。
+        additivity=false：不向 root 传播，避免同一行日志被打印多次。
+    -->
+    <logger name="com.lab.cms" level="DEBUG" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE_ALL"/>
+        <appender-ref ref="FILE_ERROR"/>
+        <appender-ref ref="FILE_BIZ"/>
+    </logger>
+
+    <!--
+        MyBatis 的 SQL 日志。
+        ⚠️ 这里只调到 DEBUG 级别并让 MyBatis 自己输出。
+        注意：MyBatis 打印 SQL 有两种方式：
+          ① 在 MyBatis 配置里设 logImpl=SLF4J（推荐），SQL 会走本 logger
+          ② 靠 MP 的 p6spy（本项目不引）
+        本项目用方式 ①，所以这里调 DEBUG 就能看到完整 SQL 与参数。
+        调成 INFO 可以关闭 SQL 打印（演示时更清爽）。
+    -->
+    <logger name="com.lab.cms.mapper" level="DEBUG"/>
+
+    <!-- Druid 连接池：INFO 即可，DEBUG 会刷屏 -->
+    <logger name="com.alibaba.druid" level="INFO"/>
+
+    <!-- Spring 框架：INFO；DEBUG 会输出大量 bean 装配信息 -->
+    <logger name="org.springframework" level="INFO"/>
+    <!-- Spring 事务管理：DEBUG 能看到事务开启/提交/回滚，排查事务问题时很有用 -->
+    <logger name="org.springframework.jdbc.datasource.DataSourceTransactionManager" level="DEBUG"/>
+    <logger name="org.springframework.transaction.interceptor" level="DEBUG"/>
+
+    <!-- 注意：SpringMVC 的 DEBUG 会输出每个请求的映射匹配过程，排查 404 时有用 -->
+    <logger name="org.springframework.web.servlet" level="INFO"/>
+
+    <!-- ==================== Root ==================== -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE_ALL"/>
+        <appender-ref ref="FILE_ERROR"/>
+    </root>
+
+</configuration>

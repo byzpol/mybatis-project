@@ -1,0 +1,64 @@
+# ==========================================================
+# 数据库连接配置 - 示例模板
+# ==========================================================
+# 【重要】本文件是模板，用于入库供组员参考。
+#         真正生效的文件是 db.properties（同目录），该文件已被 .gitignore 排除，
+#         永不提交到仓库，永不截图到报告。
+#
+# 使用方式：
+#   1. 复制本文件，重命名为 db.properties
+#   2. 把下面四项改成你本机的实际值
+#   3. db.properties 不要 commit
+#
+# 评分标准明确：硬编码真实账号口令 = 维度三计 0 分。这是红线。
+# ==========================================================
+
+# ---- 驱动类 ----
+jdbc.driver=com.mysql.cj.jdbc.Driver
+
+# ---- 连接串 ----
+# 关键参数说明：
+#   useUnicode=true&characterEncoding=utf8  → 中文不乱码（UTF-8 全链路）
+#   useSSL=false                            → 本地开发不走 SSL（避免证书警告）
+#   serverTimezone=Asia/Shanghai            → MySQL 8+ 必须指定时区，否则报时区错误
+#   allowPublicKeyRetrieval=true            → MySQL 8+ 默认认证方式需允许取公钥
+#   rewriteBatchedStatements=true           → 批量插入性能优化（20 条演示数据批量灌入时有效）
+jdbc.url=jdbc:mysql://localhost:3306/cms_db?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+
+# ---- 账号口令（改成你本机的）----
+jdbc.username=root
+jdbc.password=your_password_here
+
+# ==========================================================
+# Druid 连接池参数
+# ==========================================================
+# 初始连接数
+druid.initialSize=5
+# 最小空闲连接数
+druid.minIdle=5
+# 最大活跃连接数（课程项目 20 足够，答辩时并发很低）
+druid.maxActive=20
+# 获取连接的最大等待时间（毫秒）
+druid.maxWait=60000
+# 连接有效性检测 SQL
+druid.validationQuery=SELECT 1
+# 空闲连接检测间隔（毫秒）
+druid.timeBetweenEvictionRunsMillis=60000
+# 连接最小生存时间（毫秒）
+druid.minEvictableIdleTimeMillis=300000
+# 申请连接时是否检测（性能略降但更安全）
+druid.testWhileIdle=true
+druid.testOnBorrow=false
+druid.testOnReturn=false
+# 是否缓存 PreparedStatement（MySQL 建议关闭，见 Druid 官方文档）
+druid.poolPreparedStatements=false
+# 关闭连接后是否自动提交（保持默认 true）
+druid.defaultAutoCommit=true
+
+# ==========================================================
+# 日志相关（可选，供 logback 读取；本项目直接在 logback.xml 里写路径）
+# ==========================================================
+# 日志级别：DEBUG / INFO / WARN / ERROR
+log.level=DEBUG
+# 日志文件输出目录
+log.path=./logs
