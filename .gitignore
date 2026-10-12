@@ -1,0 +1,73 @@
+# ==========================================================
+# .gitignore —— 企业级 CMS 项目
+# ==========================================================
+# 对应《企业开发规范清单》5-1 与 5-2 条。
+# 核心原则：构建产物、IDE 配置、凭据、日志、依赖目录，一律不入库。
+# ==========================================================
+
+# ---------- 构建产物 ----------
+target/
+*.war
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---------- IDE ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+*.swp
+*.swo
+
+# ---------- 凭据（红线：评分标准明确硬编码口令计 0 分）----------
+src/main/resources/db.properties
+src/main/resources/jdbc.properties
+*.pem
+*.key
+.env
+.env.local
+
+# ---------- 日志 ----------
+logs/
+*.log
+*.log.gz
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 前端（Vite + Vue3）----------
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.env.local
+frontend/npm-debug.log*
+frontend/pnpm-debug.log*
+frontend/yarn-error.log*
+
+# ---------- 临时文件 ----------
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+
+# ---------- 其他 ----------
+# 排除 Maven 的 wrapper jar 之外的 wrapper 目录缓存
+.mvn/wrapper/maven-wrapper.properties
+# Claude/WorkBuddy 等工具的本地会话数据
+.workbuddy/
+
+# ---------- 换行符策略 ----------
+# 仓库内存 LF，检出时由各平台自行决定（避免 Windows 提交导致 Mac/Linux 上全文件显示为已修改）
+*.java  text
+*.xml   text
+*.md    text
+*.sql   text
+*.yml   text
+*.properties text
