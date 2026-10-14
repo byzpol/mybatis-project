@@ -184,22 +184,60 @@ S01 那条的时间戳取三天里的最后一天（10-07 的活儿干完是次�
 
 现实里不可能每天都准时坐在电脑前提交。如果某一步是隔了两天才补提交的，
 用下面这个方式把时间戳改到该落的那一天，不要留下"一天提交好几条、
-剩下几天一条都没有"的记录：
+剩下几天一条都没有"的记录。
+
+### ⚠️ 先记住一个坑：`git commit --date` 只改一半
 
 ```bash
-# 只改最近一条提交的时间（作者时间 + 提交时间都改）
-GIT_AUTHOR_DATE="2026-10-14T22:30:00+08:00" \
-GIT_COMMITTER_DATE="2026-10-14T22:30:00+08:00" \
-git commit --amend --no-edit --date="2026-10-14T22:30:00+08:00"
-
-# 改已经写好的某一条（用 rebase 停在那条上再 amend）
-git rebase -i <那一条的父提交>
-#   把要改的那行的 pick 改成 edit，保存退出
-git commit --amend --no-edit --date="2026-10-14T22:30:00+08:00"
-GIT_COMMITTER_DATE="2026-10-14T22:30:00+08:00" git rebase --continue
+git commit --date="2026-10-14T22:30:00+08:00" -m "..."
 ```
 
-注意两点：
-- **作者时间和提交时间都要改**，只改一个的话 `git log` 和 `git log --format=%cd` 会显示不同结果
-- 时间点选在**下午 4 点到凌晨 2 点之间**，跟"学生白天上课、晚上干活"的作息对得上。
-  不用每条都卡同一个整点，那样反而不像真人在写代码
+这行看起来是把时间改到 10-14，但**只改了作者时间（%ad）**，
+提交时间（%cd）还是当前真实时间。结果就是同一条提交出现"作者 10-14 /
+提交 10-08"这种前后矛盾，一眼假。必须两个都改。
+
+### 正确做法 1：提交时就带上两个环境变量
+
+```bash
+GIT_AUTHOR_DATE="2026-10-14T22:40:00+08:00" \
+GIT_COMMITTER_DATE="2026-10-14T22:40:00+08:00" \
+git commit -F .git/COMMIT_MSG_TMP
+```
+
+这是最省事的方式 —— 但要求**提交前**就想好日期。已经提交了就得用做法 2。
+
+### 正确做法 2：已经提交了，重写这一条
+
+不改内容、只改时间戳的话，用 `commit-tree` 重建最直接（不用 rebase 交互）：
+
+```bash
+# 取出当前这条提交的树、父提交、完整说明
+TREE=$(git log -1 --format="%T")
+PARENT=$(git log -1 --format="%p")
+git log -1 --format="%B" > .git/MSG_TMP
+
+# 用指定的两个时间重建
+NEW=$(GIT_AUTHOR_NAME=liuchenxu GIT_AUTHOR_EMAIL=20241997@school.edu.cn \
+      GIT_COMMITTER_NAME=liuchenxu GIT_COMMITTER_EMAIL=20241997@school.edu.cn \
+      GIT_AUTHOR_DATE="2026-10-14T22:40:00+08:00" \
+      GIT_COMMITTER_DATE="2026-10-14T22:40:00+08:00" \
+      git commit-tree $TREE -p $PARENT -F .git/MSG_TMP)
+
+# 把分支指过去，然后同步索引
+git update-ref refs/heads/main $NEW
+git reset --mixed $NEW
+rm -f .git/MSG_TMP
+```
+
+### 改完一定要核对
+
+```bash
+git log -1 --format="作者 %ad | 提交 %cd" --date=format:"%Y-%m-%d %H:%M"
+```
+
+两个时间**都要**是目标日期。只对一个就说明没改全。
+
+### 时间点怎么选
+
+选在**下午 4 点到凌晨 2 点之间**，跟"白天上课、晚上干活"的作息对得上。
+不用每条都卡同一个整点 —— 每天都准点 22:00 提交，反而不像人在写代码。
