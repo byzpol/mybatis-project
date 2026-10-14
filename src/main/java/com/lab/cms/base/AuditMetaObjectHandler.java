@@ -78,6 +78,19 @@ public class AuditMetaObjectHandler implements MetaObjectHandler {
     private static final String FIELD_CREATE_TIME = "createTime";
     private static final String FIELD_UPDATE_BY = "updateBy";
     private static final String FIELD_UPDATE_TIME = "updateTime";
+    private static final String FIELD_DELETED = "deleted";
+
+    /**
+     * 逻辑删除标记的"未删除"值。
+     * <p>必须与 {@code BaseEntity} 上的 {@code @TableLogic(value = "0", delval = "1")}
+     * 以及 {@code MybatisConfig} 里 {@code dbConfig.setLogicNotDeleteValue("0")} 三者一致。
+     * <p>⚠️ 在这里显式填 0 而不是依赖数据库 DEFAULT：数据库列虽然定了
+     * {@code DEFAULT 0}，但 MP 生成的 INSERT 语句**会把这个列列进去**，
+     * 于是显式传了 null，DEFAULT 就不起作用了（MySQL 只在"列未出现在 INSERT 列表中"
+     * 时才使用 DEFAULT）。结果就是 {@code Column 'deleted' cannot be null}。
+     * 这与 create_time 的坑是同一类，见下方 insertFill 注释。
+     */
+    private static final Integer DELETED_NO = 0;
 
     /**
      * 系统操作用户 ID。
@@ -91,9 +104,13 @@ public class AuditMetaObjectHandler implements MetaObjectHandler {
     /**
      * INSERT 时填充。
      *
-     * <p>填充 createBy / createTime / updateBy / updateTime 四个字段 ——
+     * <p>填充 createBy / createTime / updateBy / updateTime / deleted 五个字段 ——
      * 新建的记录，它的"更新人/更新时间"就等于"创建人/创建时间"，
      * 这样查询"最近更新的记录"时不会漏掉刚创建的那些。
+     *
+     * <p><b>为什么 deleted 也要在这里填</b>：见 {@link #DELETED_NO} 的说明。
+     * 简短版：MP 会把 deleted 列写进 INSERT 语句的值列表，
+     * 传 null 时数据库的 DEFAULT 0 不生效，直接违反 NOT NULL 约束。
      */
     @Override
     public void insertFill(MetaObject metaObject) {
@@ -110,6 +127,13 @@ public class AuditMetaObjectHandler implements MetaObjectHandler {
         Long auditUserId = currentUserId != null ? currentUserId : SYSTEM_USER_ID;
         strictInsertFill(metaObject, FIELD_CREATE_BY, Long.class, auditUserId);
         strictInsertFill(metaObject, FIELD_UPDATE_BY, Long.class, auditUserId);
+
+        // deleted：新建的记录一律是"未删除"（0）。
+        // 用 setFieldValByName 而非 strictInsertFill 的理由与 updateFill 一致：
+        // 这个字段不存在"调用方想显式指定"的合理场景，无条件写 0 语义更明确。
+        // 而且万一调用方失误传了 1（想插入一条"已删除"记录），那基本是 bug，
+        // 强制覆盖成 0 反而挡住了这种错误。
+        setFieldValByName(FIELD_DELETED, DELETED_NO, metaObject);
 
         if (currentUserId == null) {
             log.debug("审计填充：无登录用户，createBy/updateBy 记为 SYSTEM_USER_ID=0（{}）",
