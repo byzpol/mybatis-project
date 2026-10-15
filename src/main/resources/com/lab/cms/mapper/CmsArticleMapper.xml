@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    CmsArticleMapper 的 XML 映射文件。
+
+    ⚠️ 路径必须与接口包名一致：
+      接口 com.lab.cms.mapper.CmsArticleMapper
+      XML  src/main/resources/com/lab/cms/mapper/CmsArticleMapper.xml
+      （MybatisConfig 里扫描的是 classpath*:com/lab/cms/mapper/*.xml）
+
+    ⚠️ namespace 必须写全限定接口名，否则启动时报
+      "Invalid bound statement (not found)"。
+
+    ===========================================================================
+    S07 说明：本文件在 S07 阶段只建骨架，不写任何 SQL
+    ===========================================================================
+    按开发手册要求，"这一版只写接口方法，XML 加 TODO 留到业务步骤再补"。
+    此时若调用 CmsArticleMapper.selectIdTitleByKeyword(...) 会抛
+      org.apache.ibatis.binding.BindingException: Invalid bound statement (not found)
+    —— 这是<b>预期行为</b>，不是配置错误。等 S09 检索相关步骤补上 SQL 后即正常。
+
+    ⚠️ 补 SQL 时的铁律（见 docs/S05-联调实测记录.md 与 BaseEntity 类注释）：
+      手写 SQL 必须自己写 AND deleted = 0！
+      MP 的 @TableLogic 只对 MP 自动生成的 SQL 生效，XML 原样执行。
+      漏了这一句 = 查出已删除的文章，且不报错 —— 静默错数据。
+-->
+<mapper namespace="com.lab.cms.mapper.CmsArticleMapper">
+
+    <!--
+        TODO(S09) 按关键字模糊检索文章的 id 与标题。
+
+        设计要点（补实现时遵守）：
+          1. 只 SELECT id, title 两列，不取 content（LONGTEXT，全查浪费带宽）
+          2. 必须有 AND deleted = 0
+          3. 关键字用 CONCAT('%', #{keyword}, '%') 拼接，不要用 ${} 拼接字符串
+             —— ${} 是直接文本替换，会引入 SQL 注入
+          4. 可选：关键字为 null / 空白串时直接返回空列表或全量（由 Service 决定）
+
+        留空是有意为之 —— S07 不做业务实现。
+    -->
+</mapper>

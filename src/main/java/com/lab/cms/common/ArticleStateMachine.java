@@ -46,6 +46,44 @@ import java.util.TreeSet;
  *
  * <p><b>ARCHIVED 是终态</b>，任何动作都非法（迁移表中没有任何以 ARCHIVED 为源状态的行）。
  *
+ * <h3>完整状态机图（mermaid，可直接粘到支持 mermaid 的 Markdown 里渲染）</h3>
+ * <pre>
+ * stateDiagram-v2
+ *     [*] --&gt; DRAFT
+ *     DRAFT --&gt; PENDING_EDITOR : SUBMIT
+ *     REJECTED --&gt; PENDING_EDITOR : SUBMIT
+ *     PENDING_EDITOR --&gt; PENDING_CHIEF : AUDIT_PASS
+ *     PENDING_EDITOR --&gt; REJECTED : AUDIT_REJECT
+ *     PENDING_CHIEF --&gt; APPROVED : AUDIT_PASS
+ *     PENDING_CHIEF --&gt; REJECTED : AUDIT_REJECT
+ *     APPROVED --&gt; PUBLISHED : PUBLISH_NOW
+ *     APPROVED --&gt; SCHEDULED : PUBLISH_SCHEDULE
+ *     SCHEDULED --&gt; PUBLISHED : PUBLISH_SCHEDULED_TRIGGER
+ *     PUBLISHED --&gt; WITHDRAWN : WITHDRAW
+ *     PUBLISHED --&gt; OFFLINE : OFFLINE
+ *     WITHDRAWN --&gt; PUBLISHED : PUBLISH_NOW
+ *     WITHDRAWN --&gt; ARCHIVED : ARCHIVE
+ *     OFFLINE --&gt; ARCHIVED : ARCHIVE
+ *     ARCHIVED --&gt; [*]
+ * </pre>
+ * <p>数一数上面带标签的箭头：14 条，与 {@code TRANSITIONS} 的条目数一致
+ * （有 JUnit 断言 {@code transitionCount() == 14} 兜底）。</p>
+ *
+ * <h3>公开方法一览（容易混淆的两组）</h3>
+ * <pre>
+ *   查询（不抛异常）：
+ *     canTransfer(status, action)      boolean  —— 能/不能
+ *     nextStatus(fromCode, action)     Integer  —— 目标状态码；非法返回 null
+ *   执行（抛异常）：
+ *     transfer(status, action)         ArticleStatus —— 目标状态；非法抛异常（三种错误码分情况）
+ *     assertTransfer(fromCode, action) void     —— 非法一律抛 ARTICLE_STATUS_ILLEGAL
+ *   元信息（供文档与测试）：
+ *     allTransitions() / outDegree(status) / transitionCount()
+ * </pre>
+ * <p>⚠️ 新增 {@code nextStatus / assertTransfer} 的背景：S04 建本类时只有
+ * {@code transfer}（抛异常版），S07 按开发手册补齐了"不抛异常"与"固定错误码"两种语义。
+ * 老方法签名保持不变，避免影响 S05 已落地的调用点。</p>
+ *
  * <h3>为什么用 "状态:动作" 字符串作 key 而不是二维数组</h3>
  * <p>用 {@code Map<String, ArticleStatus>} 的 key = {@code "DRAFT:SUBMIT"}：
  * <ul>
@@ -217,6 +255,85 @@ public final class ArticleStateMachine {
      */
     public static ArticleStatus transfer(Integer statusCode, ArticleAction action) {
         return transfer(ArticleStatus.ofNullable(statusCode), action);
+    }
+
+    // ==================== 另一组命名：nextStatus / assertTransfer ====================
+
+    /**
+     * 计算目标状态：合法返回目标，非法或状态码无法识别返回 {@code null}，<b>不抛异常</b>。
+     *
+     * <p>与 {@link #transfer} 的区别只在"非法时怎么办"：
+     * <table border="1">
+     *   <tr><th></th><th>{@link #transfer}</th><th>{@link #nextStatus}</th></tr>
+     *   <tr><td>合法迁移</td><td>目标状态</td><td>目标状态</td></tr>
+     *   <tr><td>非法迁移</td><td>抛异常</td><td>返回 null</td></tr>
+     *   <tr><td>入参 null / 脏状态码</td><td>抛异常</td><td>返回 null</td></tr>
+     * </table>
+     *
+     * <p><b>什么时候用哪个</b>：
+     * <ul>
+     *   <li>真正执行动作（用户点了"提交"）→ 用 {@link #transfer}。
+     *       它能直接给出人话错误信息并中断流程，符合"Fail Fast"。</li>
+     *   <li>只想<b>试探</b>而不想中断 → 用本方法。典型场景：
+     *       ① 给前端算按钮可用性（"这篇能不能撤回"）
+     *       ② 单元测试里做穷举矩阵断言（对 100 个组合逐个验证合法性，
+     *          不想在每个非法组合上 try/catch）
+     *       ③ 批量操作时先过滤出可执行的 id 集合</li>
+     * </ul>
+     *
+     * <p>⚠️ 正因为它是"不报错的版本"，<b>绝不要用它来做实际的状态变更</b>：
+     * {@code Integer t = nextStatus(...); } 之后若只写
+     * "if (t != null) { 更新 }" 而漏掉 else 分支，操作会静默什么都不做 ——
+     * 这类 bug 比抛异常难查得多。
+     * 所以方法的 Javadoc 特意把这条写在显眼处。
+     *
+     * @param from   当前状态码（可为 null，返回 null）
+     * @param action 动作（可为 null，返回 null）
+     * @return 目标状态码；非法组合返回 null
+     */
+    public static Integer nextStatus(Integer from, ArticleAction action) {
+        if (action == null) {
+            return null;
+        }
+        // 用 ofNullable：库里若有 0~9 之外的脏值，这里返回 null 而非抛异常
+        ArticleStatus current = ArticleStatus.ofNullable(from);
+        if (current == null || current.isFinal()) {
+            return null;
+        }
+        ArticleStatus target = TRANSITIONS.get(key(current, action));
+        return target == null ? null : target.getCode();
+    }
+
+    /**
+     * 断言迁移合法：合法则通过，非法则抛
+     * {@link BusinessException} 且错误码为 {@code ARTICLE_STATUS_ILLEGAL(11002)}。
+     *
+     * <p>语义与 {@link #transfer} 几乎相同（都抛异常），差异在<b>错误码的确定性</b>：
+     * <ul>
+     *   <li>{@link #transfer} 会按情况抛三种不同错误码 ——
+     *       {@code ARTICLE_NOT_FOUND} / {@code ARTICLE_ARCHIVED_READONLY} /
+     *       {@code ARTICLE_STATUS_ILLEGAL}。提示更精准，适合业务入口。</li>
+     *   <li>本方法<b>对任何非法情况一律抛 {@code ARTICLE_STATUS_ILLEGAL}</b>。
+     *       适合"我只要一个 YES/NO 断言"的场合，调用方 catch 时不用分辨是哪种非法。</li>
+     * </ul>
+     *
+     * <p>手册中要求的就是这个方法名与这个错误码，故保留；
+     * 两者并存不冲突，S09 起的业务实现可按需选择。
+     *
+     * @param from   当前状态码
+     * @param action 待执行动作
+     * @throws BusinessException 错误码 {@code ARTICLE_STATUS_ILLEGAL}
+     */
+    public static void assertTransfer(Integer from, ArticleAction action) {
+        if (nextStatus(from, action) == null) {
+            ArticleStatus current = ArticleStatus.ofNullable(from);
+            String currentDesc = (current == null)
+                    ? ("未知状态(" + from + ")")
+                    : current.getDescription();
+            String actionDesc = (action == null) ? "未知动作" : action.getDescription();
+            throw new BusinessException(ErrorCode.ARTICLE_STATUS_ILLEGAL,
+                    String.format("文章当前状态为「%s」，不允许执行「%s」", currentDesc, actionDesc));
+        }
     }
 
     // ==================== 供文档与测试使用 ====================

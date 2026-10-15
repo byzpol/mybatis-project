@@ -380,4 +380,178 @@ public class ArticleStateMachineTest {
         assertTrue(ArticleAction.AUDIT_REJECT.isAuditAction());
         assertFalse(ArticleAction.SUBMIT.isAuditAction());
     }
+
+    // ==================== 六、S07 新增：nextStatus / assertTransfer ====================
+
+    /**
+     * {@code nextStatus} 在 14 条合法迁移上必须返回正确的目标状态码。
+     * <p>与 {@code transfer} 的结果逐一交叉验证 —— 两者对合法迁移必须一致。
+     */
+    @Test
+    public void testNextStatusOnLegalTransitions() {
+        Map<String, ArticleStatus> expected = expectedTransitions();
+        expected.forEach((key, target) -> {
+            String[] parts = key.split(":");
+            ArticleStatus from = ArticleStatus.valueOf(parts[0]);
+            ArticleAction action = ArticleAction.valueOf(parts[1]);
+
+            Integer code = ArticleStateMachine.nextStatus(from.getCode(), action);
+            assertNotNull("合法迁移 nextStatus 不应为 null：" + key, code);
+            assertEquals("nextStatus 的目标与期望不符：" + key,
+                    target.getCode(), code);
+            // 与 transfer 交叉验证
+            assertEquals("nextStatus 与 transfer 结果应一致：" + key,
+                    ArticleStateMachine.transfer(from, action).getCode(), code);
+        });
+    }
+
+    /**
+     * {@code nextStatus} 对非法迁移必须返回 null 且<b>不抛异常</b>。
+     * <p>这是它与 {@code transfer} 的核心差异。
+     */
+    @Test
+    public void testNextStatusReturnsNullOnIllegalTransitions() {
+        Map<String, ArticleStatus> legal = expectedTransitions();
+        int illegalCount = 0;
+        for (ArticleStatus from : ArticleStatus.values()) {
+            for (ArticleAction action : ArticleAction.values()) {
+                String key = from.name() + ":" + action.name();
+                if (legal.containsKey(key)) {
+                    continue;
+                }
+                illegalCount++;
+                Integer code = ArticleStateMachine.nextStatus(from.getCode(), action);
+                assertEquals("非法迁移 nextStatus 应返回 null：" + key, null, code);
+            }
+        }
+        assertEquals("非法组合应有 86 种", 86, illegalCount);
+    }
+
+    /**
+     * {@code nextStatus} 对空值与脏数据必须安全（返回 null，不抛 NPE）。
+     */
+    @Test
+    public void testNextStatusNullSafety() {
+        assertEquals("null 状态码应返回 null",
+                null, ArticleStateMachine.nextStatus(null, ArticleAction.SUBMIT));
+        assertEquals("null 动作应返回 null",
+                null, ArticleStateMachine.nextStatus(ArticleStatus.DRAFT.getCode(), null));
+        assertEquals("未知状态码 99 应返回 null",
+                null, ArticleStateMachine.nextStatus(99, ArticleAction.SUBMIT));
+        assertEquals("负数状态码应返回 null",
+                null, ArticleStateMachine.nextStatus(-1, ArticleAction.SUBMIT));
+        assertEquals("已归档出发应返回 null",
+                null, ArticleStateMachine.nextStatus(
+                        ArticleStatus.ARCHIVED.getCode(), ArticleAction.SUBMIT));
+    }
+
+    /**
+     * {@code assertTransfer} 对合法迁移不抛异常，对非法迁移一律抛
+     * {@code ARTICLE_STATUS_ILLEGAL(11002)}。
+     *
+     * <p>注意与 {@code transfer} 的区别：后者对"已归档"抛
+     * {@code ARTICLE_ARCHIVED_READONLY}、对 null 状态抛 {@code ARTICLE_NOT_FOUND}；
+     * 前者<b>一律</b>抛 {@code ARTICLE_STATUS_ILLEGAL}。
+     */
+    @Test
+    public void testAssertTransferSemantics() {
+        // 1) 合法迁移不抛
+        ArticleStateMachine.assertTransfer(ArticleStatus.DRAFT.getCode(), ArticleAction.SUBMIT);
+        ArticleStateMachine.assertTransfer(ArticleStatus.APPROVED.getCode(), ArticleAction.PUBLISH_NOW);
+
+        // 2) 各种非法情形一律抛 ARTICLE_STATUS_ILLEGAL
+        Object[][] illegal = {
+                {ArticleStatus.PUBLISHED.getCode(), ArticleAction.SUBMIT, "已发布+提交"},
+                {ArticleStatus.ARCHIVED.getCode(), ArticleAction.SUBMIT, "已归档+提交"},
+                {ArticleStatus.DRAFT.getCode(), ArticleAction.WITHDRAW, "草稿+撤回"},
+                {ArticleStatus.REJECTED.getCode(), ArticleAction.AUDIT_PASS, "已驳回+通过"},
+                {null, ArticleAction.SUBMIT, "null 状态+提交"},
+                {12345, ArticleAction.SUBMIT, "脏状态码+提交"},
+                {ArticleStatus.DRAFT.getCode(), null, "草稿+null 动作"},
+        };
+        for (Object[] c : illegal) {
+            Integer from = (Integer) c[0];
+            ArticleAction action = (ArticleAction) c[1];
+            String desc = (String) c[2];
+            try {
+                ArticleStateMachine.assertTransfer(from, action);
+                fail("非法迁移应抛异常：" + desc);
+            } catch (BusinessException e) {
+                assertEquals("assertTransfer 应固定抛 ARTICLE_STATUS_ILLEGAL：" + desc,
+                        ErrorCode.ARTICLE_STATUS_ILLEGAL.getCode(), e.getCode());
+                assertNotNull("异常信息不应为空：" + desc, e.getMessage());
+                assertFalse("异常信息不应为空串：" + desc, e.getMessage().trim().isEmpty());
+            }
+        }
+    }
+
+    /**
+     * 与 {@code transfer} 的差异必须在"已归档"与"null 状态"两处体现出来 ——
+     * 这是两个方法语义分工的证据，也是防止将来有人误把两者合并。
+     */
+    @Test
+    public void testAssertTransferDiffersFromTransfer() {
+        // 已归档：transfer 抛 ARTICLE_ARCHIVED_READONLY，assertTransfer 抛 ARTICLE_STATUS_ILLEGAL
+        try {
+            ArticleStateMachine.transfer(ArticleStatus.ARCHIVED, ArticleAction.SUBMIT);
+            fail("应抛异常");
+        } catch (BusinessException e) {
+            assertEquals("transfer 对已归档应用 ARCHIVED_READONLY",
+                    ErrorCode.ARTICLE_ARCHIVED_READONLY.getCode(), e.getCode());
+        }
+        try {
+            ArticleStateMachine.assertTransfer(ArticleStatus.ARCHIVED.getCode(), ArticleAction.SUBMIT);
+            fail("应抛异常");
+        } catch (BusinessException e) {
+            assertEquals("assertTransfer 对已归档仍用 STATUS_ILLEGAL",
+                    ErrorCode.ARTICLE_STATUS_ILLEGAL.getCode(), e.getCode());
+        }
+
+        // null 状态：transfer 抛 ARTICLE_NOT_FOUND，assertTransfer 抛 ARTICLE_STATUS_ILLEGAL
+        try {
+            ArticleStateMachine.transfer((ArticleStatus) null, ArticleAction.SUBMIT);
+            fail("应抛异常");
+        } catch (BusinessException e) {
+            assertEquals("transfer 对 null 状态应用 ARTICLE_NOT_FOUND",
+                    ErrorCode.ARTICLE_NOT_FOUND.getCode(), e.getCode());
+        }
+        try {
+            ArticleStateMachine.assertTransfer(null, ArticleAction.SUBMIT);
+            fail("应抛异常");
+        } catch (BusinessException e) {
+            assertEquals("assertTransfer 对 null 状态仍用 STATUS_ILLEGAL",
+                    ErrorCode.ARTICLE_STATUS_ILLEGAL.getCode(), e.getCode());
+        }
+    }
+
+    /**
+     * 三个查询/断言方法在全部 100 组合上必须互相自洽：
+     * <pre>
+     *   canTransfer == true  ⟺  nextStatus != null  ⟺  transfer 不抛异常
+     * </pre>
+     * <p>任何一条不等价都说明实现里有分支漏了。
+     */
+    @Test
+    public void testThreeMethodsAreConsistentOverAllCombinations() {
+        for (ArticleStatus from : ArticleStatus.values()) {
+            for (ArticleAction action : ArticleAction.values()) {
+                String key = from.name() + ":" + action.name();
+
+                boolean can = ArticleStateMachine.canTransfer(from, action);
+                Integer next = ArticleStateMachine.nextStatus(from.getCode(), action);
+                boolean transferThrew;
+                try {
+                    ArticleStateMachine.transfer(from, action);
+                    transferThrew = false;
+                } catch (BusinessException e) {
+                    transferThrew = true;
+                }
+
+                assertEquals("canTransfer 与 nextStatus 不一致：" + key,
+                        can, next != null);
+                assertEquals("canTransfer 与 transfer 不一致：" + key,
+                        can, !transferThrew);
+            }
+        }
+    }
 }
