@@ -22,6 +22,15 @@ jdbc.driver=com.mysql.cj.jdbc.Driver
 #   useSSL=false                            → 本地开发不走 SSL（避免证书警告）
 #   serverTimezone=Asia/Shanghai            → MySQL 8+ 必须指定时区，否则报时区错误
 #   allowPublicKeyRetrieval=true            → MySQL 8+ 默认认证方式需允许取公钥
+#                                              ⚠️ 2026-10-16 S08 实测踩坑：
+#                                              root 用户用的是 caching_sha2_password，
+#                                              该模式在服务端有密码缓存，缓存命中走快速认证；
+#                                              **MySQL 一旦重启，缓存清空**，首次连接要走完整认证，
+#                                              在 useSSL=false 下必须向服务端索取 RSA 公钥。
+#                                              少了这个参数 → 报 "Public Key Retrieval is not allowed"，
+#                                              连接池直接起不来，所有数据库操作全挂。
+#                                              症状迷惑点：不重启 MySQL 就一直正常，重启后才炸。
+#                                              （生产环境应改用 useSSL=true&requireSSL=true 而非此参数）
 #   rewriteBatchedStatements=true           → 批量插入性能优化（20 条演示数据批量灌入时有效）
 jdbc.url=jdbc:mysql://localhost:3306/cms_db?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
 

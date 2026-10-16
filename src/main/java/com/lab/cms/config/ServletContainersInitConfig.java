@@ -96,4 +96,54 @@ public class ServletContainersInitConfig extends AbstractAnnotationConfigDispatc
         encodingFilter.setForceEncoding(true);
         return new Filter[]{encodingFilter};
     }
+
+    /**
+     * 覆写 DispatcherServlet 的创建过程 —— 本项目只用来开一个开关：{@code throwExceptionIfNoHandlerFound}。
+     *
+     * <h3>⚠️ 为什么必须开这个开关（S08 主干自测第 2 项发现的真实问题）</h3>
+     *
+     * <p><b>现象</b>：访问一个不存在的路径（如 {@code /api/v1/nonexistent}），
+     * 返回的是 <b>Tomcat 的 HTML 错误页</b>（那个"HTTP状态 404 - 未找到"的白底页面），
+     * 而不是项目统一的 {@code {"code":404,"message":"请求的资源不存在",...}} 结构。
+     * 前端拦截器按 JSON 解析时会直接抛异常。
+     *
+     * <p><b>根因</b>：SpringMVC 的 {@code DispatcherServlet} 有一个属性
+     * {@code throwExceptionIfNoHandlerFound}，**默认值是 {@code false}**。
+     * 关闭时，找不到 Handler 的情况不会抛 {@code NoHandlerFoundException}，
+     * 而是直接让容器（Tomcat）返回默认 404 页面 —— 于是
+     * {@code GlobalExceptionHandler} 里那个 {@code handleNoHandlerFound} 方法
+     * <b>写了也永远不执行</b>（一个典型的"代码看起来对、实际是死代码"陷阱）。
+     *
+     * <p><b>修复</b>：设为 {@code true}，让"找不到 Handler"走异常通道，
+     * 被全局异常处理器接管，返回统一 JSON。
+     *
+     * <h3>⚠️⚠️ 这里有一个必须记下的 API 事实（实测纠正过一个幻觉）</h3>
+     * <p>最初我打算通过 {@code ServletRegistration.setInitParameter(...)} 传参给 DispatcherServlet，
+     * 并引用了常量 {@code DispatcherServlet.THROW_EXCEPTION_IF_NO_HANDLER_FOUND}。
+     * <b>这个常量在 Spring 5.3 里根本不存在</b>（{@code javap} 实测确认）：
+     * <pre>
+     *   javap -cp spring-webmvc-5.3.31.jar org.springframework.web.servlet.DispatcherServlet
+     *   → 常量清单里没有 THROW_EXCEPTION_IF_NO_HANDLER_FOUND
+     *   → 但有方法：public void setThrowExceptionIfNoHandlerFound(boolean)
+     * </pre>
+     * 更关键的是：<b>这个属性并不会从 Servlet init-param 里读取</b>
+     * （Spring Boot 是在 {@code DispatcherServletRegistrationBean} 里主动调 setter 设的）。
+     * 所以在纯 SpringMVC + Java Config 下，唯一正确的做法是
+     * <b>在创建 DispatcherServlet 时直接调 setter</b> —— 也就是覆写本方法。
+     *
+     * <p>如果把名字猜成 init-param 字符串（如 {@code registration.setInitParameter("throwExceptionIfNoHandlerFound","true")}），
+     * 编译能过、启动也不报错，但开关<b>根本不会生效</b> —— 又一个静默失效。
+     *
+     * <p>⚠️ 副作用评估：开启后，静态资源 404 也会走异常通道（本项目没有静态资源，
+     * DispatcherServlet 映射到 "/"，所有请求都进 SpringMVC，所以影响是中性的）。
+     */
+    @Override
+    protected org.springframework.web.servlet.FrameworkServlet createDispatcherServlet(
+            org.springframework.web.context.WebApplicationContext servletAppContext) {
+        org.springframework.web.servlet.DispatcherServlet dispatcherServlet =
+                new org.springframework.web.servlet.DispatcherServlet(servletAppContext);
+        // 让"找不到 Handler"抛 NoHandlerFoundException，交给 GlobalExceptionHandler 统一包装成 JSON
+        dispatcherServlet.setThrowExceptionIfNoHandlerFound(true);
+        return dispatcherServlet;
+    }
 }

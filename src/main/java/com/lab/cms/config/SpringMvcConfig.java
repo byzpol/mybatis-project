@@ -159,6 +159,11 @@ public class SpringMvcConfig implements WebMvcConfigurer {
                         "/api/v1/auth/**",
                         // 健康检查：探活工具需要在无登录态时也能访问
                         "/api/v1/system/health",
+                        // S08 主干探活端点：只放行 ping 这一个。
+                        // 用精确路径而不是 /api/v1/health/** —— 因为 HealthController 里
+                        // 还有能触发异常与写库的自测端点（/boom、/db-roundtrip 等），
+                        // 那些不该对匿名请求开放。**放行范围要按最小必要来划**。
+                        "/api/v1/health/ping",
                         // 错误页与静态资源（本项目基本不用，但保留以防将来加）
                         "/error",
                         "/favicon.ico"
