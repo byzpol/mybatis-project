@@ -1,0 +1,16 @@
+{
+  "//": "本文件只服务于编辑器（VS Code / IDEA）的路径提示，不参与构建。作用是让 IDE 认出 vite.config.js 里配的 '@' 别名，从而 Ctrl+点击能跳转、自动补全能提示。",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    "jsx": "preserve",
+    "checkJs": false
+  },
+  "include": ["src/**/*.js", "src/**/*.vue", "vite.config.js"],
+  "exclude": ["node_modules", "dist"]
+}

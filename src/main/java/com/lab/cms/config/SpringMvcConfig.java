@@ -16,6 +16,7 @@ import org.springframework.stereotype.Controller;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.util.List;
@@ -131,6 +132,78 @@ public class SpringMvcConfig implements WebMvcConfigurer {
     @Override
     public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
         resolvers.add(0, new CurrentUserArgumentResolver());
+    }
+
+    /**
+     * 【F01 新增 · 主干加方法，未改任何既有签名】放行前端构建产物。
+     *
+     * <h3>为什么必须加这个方法</h3>
+     * <p>三个已有的配置叠在一起，会导致"war 打包后前端页面打不开"：
+     * <ol>
+     *   <li>{@code ServletContainersInitConfig#getServletMappings()} 返回 {@code {"/"}} ——
+     *       DispatcherServlet <b>顶替了 Tomcat 的 DefaultServlet</b>；</li>
+     *   <li>本类上的 {@code @EnableWebMvc} 会<b>关闭</b>"未匹配请求转交默认 Servlet"的机制
+     *       （Spring Boot 里靠自动配置补上，纯 SSM 必须自己写）；</li>
+     *   <li>于是 {@code /cms-mis/index.html}、{@code /cms-mis/assets/*.js} 这些真实存在的文件
+     *       在 DispatcherServlet 里找不到映射 → 被判为"无 handler"。</li>
+     * </ol>
+     * <p>又因为 S08 打开了 {@code throwExceptionIfNoHandlerFound}，
+     * 最后落到 {@code GlobalExceptionHandler} 返回一个 <b>404 的 JSON</b> ——
+     * 浏览器拿到的不是网页而是 {@code {"code":404,...}}，页面彻底白屏。
+     *
+     * <h3>为什么不用 configureDefaultServletHandling().enable()</h3>
+     * <p>那是 XML 时代 {@code <mvc:default-servlet-handler/>} 的等价物，
+     * 会把<b>所有</b>未匹配请求都转给默认 Servlet。而默认 Servlet 对不存在的路径
+     * 返回的是 Tomcat 的 HTML 错误页 —— 正好把 S08 刚修好的"统一 404 结果"
+     * 又打回原形（转发后 SpringMVC 认为"handler 找到了"，{@code throwExceptionIfNoHandlerFound} 不再触发）。
+     * <p>所以这里<b>只放行确实存在的三类静态资源</b>，其余路径照旧走统一 404，
+     * 两个目标不冲突。
+     *
+     * <h3>为什么 index.html 和 assets 的缓存策略不一样</h3>
+     * <p>· {@code index.html} / {@code favicon.ico}：{@code setCachePeriod(0)} 不缓存。
+     * Vite 每次构建都会换掉 assets 里的文件名，index.html 是"指路牌"，
+     * 一旦被浏览器缓存，发版后用户会拿着旧壳子去请求已被 {@code emptyOutDir} 删掉的老 chunk。
+     * <p>· {@code /assets/**}：文件名自带内容哈希（如 {@code index-D2gkF2JF.js}），
+     * 内容变了名字必变，因此可以放心强缓存 30 天。
+     *
+     * <h3>⚠️ 为什么 location 必须写成 {@code "/assets/"} 而不是 {@code "/"}</h3>
+     * <p>这是实测踩出来的：一开始两个 handler 都写 {@code addResourceLocations("/")}，
+     * 结果 {@code /index.html} 能打开，<b>所有 /assets 下的 js/css 却一律 404</b>。
+     *
+     * <p>原因在 {@code ResourceHttpRequestHandler} 解析资源的算法：
+     * 它先按 URL pattern 把请求路径"切掉"匹配到的部分，再把剩下的相对路径拼到 location 上。
+     * <ul>
+     *   <li>{@code /assets/index-x.js} 匹配 pattern {@code /assets/**} → 剩余 {@code index-x.js}；
+     *       拼到 location {@code "/"} 上时，{@code StringUtils.applyRelativePath("/", "index-x.js")}
+     *       的结果是 {@code "/index-x.js"} —— <b>前缀 assets/ 丢了</b>，
+     *       于是去 web 根目录找 {@code index-x.js}，自然找不到 → 404。</li>
+     *   <li>改成 location {@code "/assets/"} 后：{@code applyRelativePath("/assets/", "index-x.js")}
+     *       = {@code "/assets/index-x.js"} ✅。</li>
+     * </ul>
+     * <p><b>结论：location 的目录层级必须与 URL 前缀对齐。</b>
+     *
+     * <p>至于 {@code /index.html}：它的 pattern 把整个路径都吃掉了，剩余路径是空串，
+     * 拼出来是 web 根目录 {@code "/"}；Tomcat 对 web 根目录会按欢迎页规则返回 {@code index.html}
+     * —— 能跑通，但属于"顺带成立"，所以这里把原因写清楚，避免后人误以为 location {@code "/"}
+     * 是通用写法又去套用到子目录上。
+     *
+     * <p>另一条路是直接写 {@code addResourceHandler("/**").addResourceLocations("/")}，
+     * 那样算法反而正确（剩余路径带了 {@code assets/}），代价是它会兜住<b>所有</b>未匹配路径，
+     * 把 S08 修好的"未知路径返回统一 Result 404"冲掉（转发给默认 Servlet 后变成 Tomcat 的 HTML 错误页）。
+     * 两害相权，选择"精确放行 + location 对齐"，保住接口契约。
+     */
+    @Override
+    public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        // 入口页：不缓存，否则发版后用户拿着旧壳子去要已被 emptyOutDir 删掉的老 chunk
+        registry.addResourceHandler("/index.html")
+                .addResourceLocations("/")
+                .setCachePeriod(0);
+
+        // 构建产物：文件名自带内容哈希（index-D2gkF2JF.js），内容变了名字必变，可放心长缓存。
+        // ⚠️ location 必须写 "/assets/"，与 URL 前缀对齐 —— 见上方类注释。
+        registry.addResourceHandler("/assets/**")
+                .addResourceLocations("/assets/")
+                .setCachePeriod(60 * 60 * 24 * 30);
     }
 
     /**

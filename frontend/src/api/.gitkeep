@@ -1,0 +1,4 @@
+# 占位文件：保持目录被 git 跟踪。
+# 分工见《企业开发规范清单》5-5 / 5-6：
+#   · api/     所有 HTTP 调用集中在这层（F02 建 request.js 与 modules/*.js）
+#   · 页面组件一律 import { xxxApi } from '@/api/xxx'，不直接写 axios.get(...)

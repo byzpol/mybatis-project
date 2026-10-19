@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<!--
+  Vite 的入口 HTML。
+  · lang="zh-CN"：声明中文文档，浏览器不会误触发翻译提示
+  · <script type="module" src="/src/main.js">：Vite 从这一行开始解析整个依赖图
+  · 不引任何 CDN 资源：内网/离线环境也能跑（答辩现场不赌网络）
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CMS 内容管理系统</title>
+  </head>
+  <body>
+    <!-- Vue 应用挂载点，见 src/main.js 的 app.mount('#app') -->
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

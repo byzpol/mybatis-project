@@ -11,6 +11,12 @@ target/
 *.jar
 !.mvn/wrapper/maven-wrapper.jar
 
+# 前端构建产物：vite.config.js 的 build.outDir 指向这里（产物直接进 war）。
+# 它和 target/ 同性质 —— 完全由 `npm run build` 生成，所以不入库。
+# 后果：克隆仓库后必须先在 frontend/ 下执行 `npm install && npm run build`，
+#       再执行 `mvn package`，打出来的 war 才带前端页面。详见 docs/F01-*-实测记录.md。
+src/main/webapp/
+
 # ---------- IDE ----------
 .idea/
 *.iml
