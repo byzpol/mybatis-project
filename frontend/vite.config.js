@@ -36,12 +36,26 @@ export default defineConfig(({ command }) => ({
     // 不设 strictPort：端口被占用时 Vite 自动顺延到 5174/5175，
     // 后端的 CORS 配置已按 http://localhost:[*] 放开，顺延也能联调
     proxy: {
-      // 开发期把 /api 透传给 Tomcat，浏览器看到的是同源请求，
-      // 于是 JSESSIONID 这个 Cookie 能正常携带（跨域 + 第三方 Cookie 会被浏览器拦掉）。
-      // 注意：不做 rewrite —— 后端 URL 本身就带 /api/v1 前缀，原样转发即可。
+      /**
+       * 开发期把 /api 透传给 Tomcat，浏览器看到的是同源请求，
+       * 于是 JSESSIONID 这个 Cookie 能正常携带（跨域 + 第三方 Cookie 会被浏览器拦掉）。
+       *
+       * ⚠️ rewrite 不能省（F02 实测踩到）：后端用 Java 配置类部署在 Tomcat 的
+       *    context path = /cms-mis 下，接口真身是
+       *        http://localhost:8080/cms-mis/api/v1/health/ping
+       *    而开发页地址是 http://localhost:5173/，前端只写 '/api/v1/...'。
+       *    若原样转发 → 请求打到 http://localhost:8080/api/v1/...，
+       *    Tomcat 里根本没有 /api 这个上下文，直接回它自己的 HTML 404 页
+       *    （不是后端的统一 JSON，前端拿到的是 <!doctype html>，排查时极具迷惑性）。
+       *    所以必须把 context path 补回去。
+       *
+       *    注意这和 base('/cms-mis/') 是两件事：base 管静态资源 URL，
+       *    这里管接口转发，构建产物不经过 proxy，所以生产环境不需要这段（同源）。
+       */
       '/api': {
         target: 'http://localhost:8080',
-        changeOrigin: true
+        changeOrigin: true,
+        rewrite: (path) => `/cms-mis${path}`
       }
     }
   },

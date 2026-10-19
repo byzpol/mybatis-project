@@ -32,6 +32,12 @@ const routes = [
     children: []
   },
   {
+    path: '/403',
+    name: 'Forbidden',
+    component: () => import('@/views/error/403.vue'),
+    meta: { title: '无访问权限' }
+  },
+  {
     // 兜底 404：必须放最后，pathMatch 会吃掉所有未匹配路径
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
@@ -55,7 +61,7 @@ const APP_NAME = 'CMS 内容管理系统'
  * 三件事按顺序做：
  * ① 写浏览器标签标题（用 meta.title，没写则只用系统名）
  * ② 未登录拦截：非 public 路由且 pinia 里没有用户信息 → 踢回 /login，并带上 redirect 参数
- * ③ 权限拦截：预留位置，F02 补完 userStore.hasPermission() 后打开
+ * ③ 权限拦截（F02 已打开）：meta.permission 存在且 hasPermission 不通过 → 跳 /403
  *
  * ⚠️ 这是「体验层」的拦截，不是安全边界。真正的鉴权在后端
  *    LoginInterceptor + PermissionAspect（主干已冻结），前端守卫被绕过也拿不到数据。
@@ -75,8 +81,12 @@ router.beforeEach((to, from, next) => {
     return next({ path: '/login', query: { redirect: to.fullPath } })
   }
 
-  // TODO(F02)：权限拦截。userStore.hasPermission 支持 'article:*' 通配后打开这里：
-  // if (to.meta.permission && !userStore.hasPermission(to.meta.permission)) return next({ path: '/403' })
+  // 权限拦截（F02 打开）：路由 meta 声明了 permission 才校验，
+  // 未声明的路由只要登录就能进 —— 避免每个页面都必须配权限码，
+  // 让"只需登录"成为默认、"需要权限"成为显式声明。
+  if (to.meta.permission && !userStore.hasPermission(to.meta.permission)) {
+    return next({ path: '/403' })
+  }
 
   next()
 })
