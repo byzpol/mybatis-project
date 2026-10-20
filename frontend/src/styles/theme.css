@@ -1,0 +1,310 @@
+/**
+ * 全局主题与基础样式（F03）
+ *
+ * 设计原则：**变量全部在 :root 收口，业务组件不写死颜色/圆角/阴影**。
+ * 换主题色只需要改这一处的 --app-* 变量 + 对应的 --el-color-* 变量。
+ *
+ * 为什么同时维护两套变量（--app-* 和 --el-color-*）：
+ *   · --app-*   本项目自己的语义变量，用于布局骨架、自定义区块（.app-card 等）
+ *   · --el-color-*  Element Plus 的变量。EP 的按钮/菜单/链接/标签全部读这些变量，
+ *                  不覆盖它们就会出现"自己的卡片是主题蓝、EP 按钮还是默认蓝"的分裂感。
+ *   两者取值必须一致，所以下面把它们写在一起，改的时候一眼能看到成对关系。
+ *
+ * ⚠️ 覆盖 EP 变量时必须连 light-N / dark-2 一起覆盖。
+ *   EP 的 hover / disabled / 浅色底（el-tag light、el-button plain）用的都是 light-3/5/7/8/9，
+ *   只改 --el-color-primary 的话，按钮 hover 会突然变回默认的 #409EFF 系。
+ *   下面这组 light-N 是按 EP 自己的算法（与白色线性混合 N/10）算出来的，不是随手估的。
+ */
+
+/* ==========================================================================
+   一、主题变量
+   ========================================================================== */
+:root {
+  /* ---------- 品牌色与语义色 ---------- */
+  --app-primary: #2f6fed; /* 沉稳蓝。不用 EP 默认的 #409EFF —— 那是"官方 demo"感最强的颜色 */
+  --app-success: #2e9e5b;
+  --app-warning: #d98b16;
+  --app-danger: #d64545;
+  --app-info: #7a8699;
+
+  /* ---------- 中性色阶 ---------- */
+  --app-text-1: #1f2733; /* 主文字：标题、关键数值 */
+  --app-text-2: #5b6675; /* 次文字：正文、表格单元格 */
+  --app-text-3: #8b95a5; /* 辅助文字：说明、占位、时间戳 */
+
+  --app-bg-page: #f5f7fa; /* 页面底色（内容区） */
+  --app-bg-card: #ffffff; /* 卡片/表格底色 */
+  --app-border: #e6eaf0; /* 分隔线、边框 */
+
+  /* ---------- 形状与阴影 ---------- */
+  --app-radius: 8px;
+  --app-radius-sm: 6px;
+  --app-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 12px rgba(16, 24, 40, 0.06);
+  --app-shadow-pop: 0 4px 16px rgba(16, 24, 40, 0.12);
+
+  /* ---------- 侧边栏（深色） ---------- */
+  --app-sidebar-bg: #1f2733;
+  --app-sidebar-text: #c3cbd8;
+  --app-sidebar-active: #2f6fed;
+  --app-sidebar-hover-bg: rgba(255, 255, 255, 0.06);
+  --app-sidebar-border: rgba(255, 255, 255, 0.08);
+
+  /* ---------- 布局尺寸（Sidebar / Navbar 组件与这里保持一致） ---------- */
+  --app-sidebar-width: 220px;
+  --app-sidebar-collapsed-width: 64px;
+  --app-navbar-height: 56px;
+
+  /* ---------- 动效 ---------- */
+  --app-transition: 200ms ease;
+
+  /* ======================================================================
+     二、覆盖 Element Plus 变量，让 EP 组件跟着主题走
+     ====================================================================== */
+
+  /* primary #2f6fed */
+  --el-color-primary: #2f6fed;
+  --el-color-primary-light-3: #6d9af2;
+  --el-color-primary-light-5: #97b7f6;
+  --el-color-primary-light-7: #c1d4fa;
+  --el-color-primary-light-8: #d5e2fb;
+  --el-color-primary-light-9: #eaf1fd;
+  --el-color-primary-dark-2: #2659be;
+
+  /* success #2e9e5b */
+  --el-color-success: #2e9e5b;
+  --el-color-success-light-3: #6dbb8c;
+  --el-color-success-light-5: #96cead;
+  --el-color-success-light-7: #c0e2ce;
+  --el-color-success-light-8: #d5ecde;
+  --el-color-success-light-9: #eaf5ef;
+  --el-color-success-dark-2: #257e49;
+
+  /* warning #d98b16 */
+  --el-color-warning: #d98b16;
+  --el-color-warning-light-3: #e4ae5c;
+  --el-color-warning-light-5: #ecc58a;
+  --el-color-warning-light-7: #f4dcb9;
+  --el-color-warning-light-8: #f7e8d0;
+  --el-color-warning-light-9: #fbf3e8;
+  --el-color-warning-dark-2: #ae6f12;
+
+  /* danger #d64545 */
+  --el-color-danger: #d64545;
+  --el-color-danger-light-3: #e27d7d;
+  --el-color-danger-light-5: #eaa2a2;
+  --el-color-danger-light-7: #f3c7c7;
+  --el-color-danger-light-8: #f7dada;
+  --el-color-danger-light-9: #fbecec;
+  --el-color-danger-dark-2: #ab3737;
+
+  /* info #7a8699 */
+  --el-color-info: #7a8699;
+  --el-color-info-light-3: #a2aab8;
+  --el-color-info-light-5: #bcc2cc;
+  --el-color-info-light-7: #d7dbe0;
+  --el-color-info-light-8: #e4e7eb;
+  --el-color-info-light-9: #f2f3f5;
+  --el-color-info-dark-2: #626b7a;
+
+  /* 文字与边框也跟着走，否则表格里的默认灰与我们的中性色阶不一致 */
+  --el-text-color-primary: var(--app-text-1);
+  --el-text-color-regular: var(--app-text-2);
+  --el-text-color-secondary: var(--app-text-3);
+  --el-text-color-placeholder: var(--app-text-3);
+  --el-border-color: var(--app-border);
+  --el-border-color-light: var(--app-border);
+  --el-border-color-lighter: var(--app-border);
+  --el-fill-color-blank: var(--app-bg-card);
+  --el-bg-color-page: var(--app-bg-page);
+
+  --el-border-radius-base: var(--app-radius-sm);
+  --el-border-radius-small: var(--app-radius-sm);
+
+  --el-font-family: 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Helvetica Neue',
+    Helvetica, Arial, sans-serif;
+}
+
+/* ==========================================================================
+   三、基础重置
+   ========================================================================== */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--el-font-family);
+  font-size: 14px;
+  color: var(--app-text-1);
+  background-color: var(--app-bg-page);
+  /* 抗锯齿：Windows 上默认渲染的字偏粗，这两行让它接近设计稿 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--app-primary);
+  text-decoration: none;
+}
+
+/* 滚动条：默认的 Windows 滚动条太宽太重，和后台的克制风格不搭 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(31, 39, 51, 0.18);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(31, 39, 51, 0.3);
+}
+
+::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+/* ==========================================================================
+   四、通用业务类
+   ========================================================================== */
+
+/* 白色卡片：页面里的每个内容区块都用它包一层，统一圆角/阴影/内边距 */
+.app-card {
+  padding: 20px;
+  background-color: var(--app-bg-card);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  box-shadow: var(--app-shadow-card);
+}
+
+.app-card + .app-card {
+  margin-top: 16px;
+}
+
+/* 页面标题区：左侧标题+副标题，右侧操作按钮，两端对齐 */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.page-header__left {
+  min-width: 0;
+}
+
+.page-header__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+  color: var(--app-text-1);
+}
+
+.page-header__desc {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--app-text-3);
+}
+
+.page-header__actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  align-items: center;
+}
+
+/* 查询条件区：放在 .app-card 里面或单独一块，不写死宽度，由业务自己排 */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.filter-bar__actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto; /* 查询/重置按钮永远靠右 */
+}
+
+/* 表格上方的工具栏（新增、批量操作） */
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.table-toolbar__right {
+  display: flex;
+  gap: 8px;
+}
+
+/* ==========================================================================
+   五、Element Plus 局部微调
+   ========================================================================== */
+
+/* 表格：表头背景用页面底色，与卡片白底形成层次，避免整片死白 */
+.el-table th.el-table__cell {
+  font-weight: 600;
+  color: var(--app-text-1);
+  background-color: var(--app-bg-page) !important;
+}
+
+.el-table {
+  --el-table-border-color: var(--app-border);
+  --el-table-header-text-color: var(--app-text-1);
+  --el-table-text-color: var(--app-text-2);
+}
+
+/* 卡片：EP 默认阴影偏重，换成我们更轻的一档 */
+.el-card {
+  border-color: var(--app-border);
+  border-radius: var(--app-radius);
+  box-shadow: var(--app-shadow-card) !important;
+}
+
+.el-button {
+  font-weight: 500;
+}
+
+/* 表单标签对齐与间距，避免默认样式下表单显得松散 */
+.el-form-item__label {
+  color: var(--app-text-2);
+}
+
+/* ==========================================================================
+   六、路由切换过渡（AppLayout 的 <router-view> 用）
+   ==========================================================================
+   淡入 + 轻微上移。不用缩放/翻转这类"花哨"动画 ——
+   后台系统的动效原则是"让用户感知到内容换了"，而不是"让用户注意到动画"。
+   过渡时长与 --app-transition 一致。
+*/
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity var(--app-transition), transform var(--app-transition);
+}
+
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}

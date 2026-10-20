@@ -1,7 +1,33 @@
 import axios from 'axios'
 import { ElLoading, ElMessage } from 'element-plus'
-import { useUserStore } from '@/store/user'
-import router from '@/router'
+// ⚠️ 显式引入这两个组件的**样式**。
+// 原因：F03 把 Element Plus 改成了按需引入（unplugin-vue-components 只处理模板里的 <el-xxx>），
+// 而 ElMessage / ElLoading 是在 .js 里以「函数」方式调用的，解析器管不到，
+// 结果就是"消息弹出来了但没有样式"（白底黑字贴在左上角）。
+// 谁在这里新增一个函数式调用的 EP 组件（如 ElMessageBox），就要顺手补一行 style。
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/loading/style/css'
+
+/**
+ * ⚠️ 本文件刻意**不**在顶层 import `@/store/user` 与 `@/router`。
+ *
+ * 依赖方向必须是单向的：store → api/modules → request。
+ * 如果这里反向静态 import store，就形成
+ *     request → store/user → api/modules/auth → request
+ * 的循环。ESM 靠"函数声明提升"能让这种循环勉强跑起来，但只要有人在模块顶层
+ * 取用被循环的那个绑定，就会命中 TDZ 报 "Cannot access before initialization"，
+ * 而且报错位置在启动阶段，极难定位。
+ *
+ * 所以这两个依赖改成"真要清登录态时才动态 import"（运行期这两句是命中模块缓存，
+ * 没有额外开销）。这也是分层原则的落地：最底层不该静态依赖上层。
+ */
+async function resolveAppLayer() {
+  const [{ useUserStore }, { default: router }] = await Promise.all([
+    import('@/store/user'),
+    import('@/router')
+  ])
+  return { useUserStore, router }
+}
 
 /**
  * axios 统一封装（F02）
@@ -12,10 +38,12 @@ import router from '@/router'
  * 2. 401 要清登录态 + 跳登录页，这是横切逻辑，散落各处必然漏。
  * 3. 错误提示要统一（且同一次错误只弹一次），散落各处会出现"一屏三个红条"。
  *
- * ⚠️ 本文件不允许出现任何硬编码 host / 端口：baseURL 只写 '/api/v1'。
- *    开发时靠 vite.config.js 的 server.proxy 把 /api 转发到 localhost:8080，
- *    生产时前端和接口同在 Tomcat 的 /cms-mis 下，天然同源。
- *    一旦这里写死 http://localhost:8080，上线即跨源 + 请求地址错。
+ * ⚠️ 本文件不允许出现任何硬编码 host / 端口。baseURL 取
+ *    `import.meta.env.BASE_URL + 'api/v1'`（开发 '/api/v1'，部署 '/cms-mis/api/v1'）：
+ *    · 开发时靠 vite.config.js 的 server.proxy 把 /api 转发到 localhost:8080
+ *    · 生产时前端和接口同在 Tomcat 的 /cms-mis 下，天然同源
+ *    一旦这里写死成绝对地址（无论 '/api/v1' 还是 'http://localhost:8080/api/v1'），
+ *    部署后都会错 —— 前者少上下文路径、后者跨源，详见下面 baseURL 处的实测记录。
  */
 
 /** 前端应用名，与 index.html / router 保持一致 */
@@ -63,18 +91,24 @@ function closeLoading() {
  *
  * 为什么需要 redirecting 标记：刷新页面时可能并发 5 个请求同时 401，
  * 不加标记就会弹 5 条「登录已过期」，并且 push 5 次路由。
+ *
+ * @param {boolean} silent 请求方声明"401 是预期结果"（如 /auth/me 探活）。
+ *        此时只清登录态，不弹提示也不跳转 —— 由调用方（路由守卫）自己决定去向。
+ *        没有这个开关的话，用户第一次打开站点就会被弹一条"登录已过期"。
  */
 let redirecting = false
 
-async function handleUnauthorized() {
+async function handleUnauthorized(silent = false) {
+  const { useUserStore, router } = await resolveAppLayer()
+
   // 清登录态：不管跳不跳路由，pinia 必须先干净，否则路由守卫以为还登着
   try {
-    const userStore = useUserStore()
-    userStore.clearUserInfo()
+    useUserStore().clearUserInfo()
   } catch (e) {
     // pinia 尚未初始化（极早期请求）时忽略，不影响主流程
   }
 
+  if (silent) return
   if (redirecting) return
   redirecting = true
   ElMessage.error('登录已过期，请重新登录')
@@ -87,7 +121,7 @@ async function handleUnauthorized() {
   try {
     await router.replace({
       path: '/login',
-      // 记下当前路径，登录成功后可跳回（登录页 F04 实现时读 query.redirect）
+      // 记下当前路径，登录成功后可跳回（登录页读 query.redirect）
       query: { redirect: current.fullPath }
     })
   } finally {
@@ -101,8 +135,26 @@ const CODE_SUCCESS = 200
 const CODE_UNAUTHORIZED = 401
 
 const request = axios.create({
-  // 只写相对前缀，见文件头注释
-  baseURL: '/api/v1',
+  /**
+   * ⚠️ baseURL 必须是「应用基路径 + /api/v1」，不能写死成 '/api/v1'（F03 实测踩坑）
+   *
+   * 写死 '/api/v1' 时，浏览器把它当**根路径绝对地址**解析，
+   * 于是请求打到 http://host:8080/api/v1/xxx；
+   * 而 war 部署在 Tomcat 的 /cms-mis 上下文下，正确的地址是
+   *     http://host:8080/cms-mis/api/v1/xxx
+   * 结果就是部署后**所有接口 404**，且响应是 Tomcat 自己的 HTML 404
+   * （不是后端统一 JSON），很容易被误判成"后端没起 / war 没部署"。
+   *
+   * 为什么开发期发现不了：dev 时 vite 的 base 是 '/'，import.meta.env.BASE_URL === '/'，
+   * 拼出来仍是 '/api/v1'，一切正常。**只有部署到 war 才暴露** ——
+   * 属于典型的"环境差异导致的静默失效"，必须靠真机部署验证才能抓到。
+   *
+   * import.meta.env.BASE_URL 由 vite.config.js 的 base 决定：
+   *   开发 → '/'         → baseURL '/api/v1'
+   *   构建 → '/cms-mis/' → baseURL '/cms-mis/api/v1'
+   * 与 router 的 createWebHistory(import.meta.env.BASE_URL) 同源同源，改一处两边一起跟着变。
+   */
+  baseURL: `${import.meta.env.BASE_URL}api/v1`,
   timeout: 15000,
   /**
    * withCredentials 为什么必须为 true：
@@ -191,7 +243,7 @@ request.interceptors.response.use(
 
     // 登录态失效
     if (res.code === CODE_UNAUTHORIZED) {
-      handleUnauthorized()
+      handleUnauthorized(silent)
       return Promise.reject(new Error(res.message || '登录已过期，请重新登录'))
     }
 
@@ -212,7 +264,7 @@ request.interceptors.response.use(
 
     // HTTP 401：与业务码 401 走同一套处理，避免清不清登录态两套逻辑
     if (response && response.status === CODE_UNAUTHORIZED) {
-      handleUnauthorized()
+      handleUnauthorized(silent)
       return Promise.reject(error)
     }
 
