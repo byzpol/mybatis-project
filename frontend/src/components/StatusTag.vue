@@ -164,6 +164,15 @@ const showIcon = computed(() => props.showIcon && meta.value.icon === 'Clock')
   /* 12px 比 EP 默认的 size 更小一档：状态列通常很窄，字号大了会把列撑开 */
   font-size: 12px;
   line-height: 18px;
+  /*
+   * ⚠️ nowrap 必须加（F06 实测补的）：
+   *    「待编辑初审」「定时发布中」都是 5 个字，在 110px 宽的状态列里
+   *    默认会被折成两行 —— 于是表格里出现"有的行高 1 行、有的行高 2 行"，
+   *    整张表看起来很毛糙，而且折行后的两行文字贴着标签边框，像样式坏了。
+   *    状态标签的文案长度是后端定的，前端能做的就是"不许它换行"，
+   *    列宽给够（各页的状态列都用 minWidth ≥ 120）。
+   */
+  white-space: nowrap;
 }
 
 .status-tag__icon {

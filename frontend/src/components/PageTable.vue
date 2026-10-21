@@ -110,8 +110,9 @@
         :width="col.width"
         :min-width="col.minWidth"
         :align="col.align || 'left'"
+        :fixed="col.fixed || false"
         :sortable="col.sortable ? 'custom' : false"
-        show-overflow-tooltip
+        :show-overflow-tooltip="col.overflowTip !== false"
       >
         <template #default="scope">
           <!--
@@ -175,6 +176,11 @@ const props = defineProps({
    *   sortField 排序时传给后端的**数据库列名**（如 'create_time'）；不写则用 prop
    *   slotName  自定义插槽名；不写则用 `col-{prop}`
    *   formatter (row) => string，默认渲染逻辑；有插槽时以插槽为准
+   *   fixed     'left' | 'right' | true —— 列固定（F06 加的，操作列用它）。
+   *             ⚠️ 只有"表格比容器宽"时才看得出效果；列都用 minWidth 且总宽不超标时，
+   *                固定列与普通列长得一模一样（这是正常的，不是没生效）
+   *   overflowTip 设为 false 可关掉该列的"内容超长显示 tooltip"（F06 加的）。
+   *             操作列必须关掉：一排 link 按钮被当成长文本截断时会很难看
    */
   columns: {
     type: Array,

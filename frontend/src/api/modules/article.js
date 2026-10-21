@@ -26,15 +26,25 @@ import { get, post, put, del } from '@/api/request'
 
 /**
  * 分页检索文章
- * GET /api/v1/articles        权限 article:list
+ * GET /api/v1/articles        权限 article:view
  * @param {Object} params 查询条件，继承 PageQuery：
  *        page(从1开始) / size(默认10，上限100) / sortField / sortOrder(asc|desc)
- *        + keyword / status / categoryId / tagId / authorId
- *          createTimeFrom / createTimeTo / onlyTop
+ *        + title / categoryId / status / authorId / beginTime / endTime
+ *          —— 字段与后端 `CmsArticleQueryDTO` 逐条对齐（F06 修正过）。
+ *          ⚠️ **没有 keyword / tagId / createTimeFrom / createTimeTo / onlyTop**
+ *             —— 这几个是本文件早期按手册写的，后端 DTO 里不存在。
+ *             传过去不会报错，只会被静默忽略（"查询条件看起来生效了其实没生效"），
+ *             属于最难发现的一类问题，所以特意在这里写明。
  * @returns {Promise<{records:Array,total:number,current:number,size:number,pages:number}>}
- *          —— 契约的 PageResult（§2.2），不是 MP 的 IPage，字段固定五个
- * 注意：sortField 必须落在后端白名单内（createTime / updateTime / publishTime /
- *       viewCount / title），传别的会被后端以 400 + PARAM_ERROR 拒掉。
+ *          —— 契约的 PageResult（§2.2），不是 MP 的 IPage，字段固定五个。
+ *          每行的字段见 `vo/CmsArticleVO`：id/title/summary/coverUrl/categoryId/categoryName/
+ *          status/statusDesc/statusColor/authorId/authorName/publisherId/publishTime/
+ *          scheduleTime/isTop/viewCount/createTime/updateTime（**不含正文**）。
+ * 注意：sortField 必须落在后端白名单内，且传的是**数据库列名（下划线）**，
+ *      不是 Java 属性名 —— `PageQuery.checkSortFieldIn` 的白名单就是列名。
+ *      文章域可用：title / view_count / create_time（+ update_time / publish_time）。
+ *      传驼峰（createTime）会被判"不支持排序"直接 400。
+ *      这条 F06 实测确认过（`PageQuery` 第 229 行注释："白名单里写的是数据库列名"）。
  */
 export function pageArticles(params) {
   return get('/articles', params)
@@ -77,8 +87,11 @@ export function listVersions(id) {
 /**
  * 新建草稿
  * POST /api/v1/articles/draft    权限 article:create     记日志
- * @param {Object} data ArticleSaveDTO：title / summary / content /
- *        coverImage / categoryId / tagIds / isTop（id 不传，新建）
+ * @param {Object} data CmsArticleSaveDTO：title（必填≤200）/ summary（≤500）/
+ *        coverUrl（≤255）/ content（可空，草稿允许只有标题）/ categoryId（必填）/
+ *        isTop（0/1）/ scheduleTime（可空）
+ *        ⚠️ F06 修正：字段名是 **coverUrl** 不是 coverImage；**没有 tagIds**
+ *           （后端 DTO 里确实没有，标签域归成员B，等 DTO 加上再补）。
  * @returns 新建文章的 id（Number）。新建草稿不做重复提交保护 → 后端非幂等，
  *          前端按钮要自己防连点（F06 表单里用 loading 锁按钮）。
  */
@@ -88,9 +101,10 @@ export function saveDraft(data) {
 
 /**
  * 编辑草稿
- * PUT /api/v1/articles/{id}/draft   权限 article:edit     记日志
+ * PUT /api/v1/articles/{id}/draft   权限 article:update   记日志
  * @param {number} id 文章 id
- * @param {Object} data ArticleSaveDTO
+ * @param {Object} data CmsArticleSaveDTO（同 saveDraft）
+ * ⚠️ 权限码是 article:update（不是本文件早期写的 article:edit —— 库里没有那个码）。
  * ⚠️ 乐观锁：后端 cms_article 有 version 列（MP @Version），
  *    并发编辑同一篇时后提交者会失败，前端要能把"版本冲突"的错误提示出来。
  */
@@ -186,8 +200,13 @@ export function withdraw(id) {
 
 /**
  * 下架
- * POST /api/v1/articles/{id}/offline   权限 article:offline  记日志
- * 已发布(5) / 已撤回(7) → 已下架(8)
+ * POST /api/v1/articles/{id}/offline   权限 article:manage  记日志
+ * 已发布(5) → 已下架(8)
+ * ⚠️ F06 按状态机源码核实：**已下架(8) 没有出边回到已发布**
+ *    （`ArticleStateMachine` 只有 `OFFLINE + ARCHIVE → ARCHIVED`，没有 `OFFLINE + PUBLISH_NOW`）。
+ *    所以"下架后重新上架"在当前状态机下做不到，前端也不该给这个按钮。
+ *    另：本接口**没有 reason 入参**；手册 S14 要求"下架必填原因"，
+ *    若 S14 给接口补了 reason，这里同步加参数。
  */
 export function offline(id) {
   return post(`/articles/${id}/offline`)
@@ -195,8 +214,9 @@ export function offline(id) {
 
 /**
  * 归档
- * POST /api/v1/articles/{id}/archive   权限 article:archive  记日志
- * → 已归档(9)，**终态**，之后不能再到任何其他状态（状态机只有单向入边）
+ * POST /api/v1/articles/{id}/archive   权限 article:manage  记日志
+ * 已撤回(7) / 已下架(8) → 已归档(9)，**终态**，之后不能再到任何其他状态
+ * （状态机里 ARCHIVED 没有任何出边）
  */
 export function archive(id) {
   return post(`/articles/${id}/archive`)
@@ -208,7 +228,7 @@ export function archive(id) {
 
 /**
  * 回滚到指定版本
- * POST /api/v1/articles/{id}/rollback  权限 article:edit     记日志
+ * POST /api/v1/articles/{id}/rollback  权限 article:update   记日志
  *
  * ⚠️ URL 以契约为准：契约是 /articles/{id}/rollback，
  *    手册写的 /articles/{id}/versions/{versionNo}/rollback 已废弃。

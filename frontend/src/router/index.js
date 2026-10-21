@@ -33,7 +33,8 @@ import { useUserStore } from '@/store/user'
  *    最终以哪套为准属于需要定的事，**在定下来之前，前端一律跟随库表**。
  */
 
-// 尚未实现的模块统一走这个占位页（F05/F06/S09~S16 会逐个换成真实页面）
+// 尚未实现的模块统一走这个占位页（F06 已把文章域 3 个菜单页换成真实页面；
+// 剩下的分类/标签/用户/角色/日志/报表归成员B/C/D，S09~S16 之后再逐个替换）
 const Placeholder = () => import('@/views/placeholder/index.vue')
 
 const routes = [
@@ -54,20 +55,48 @@ const routes = [
       {
         path: 'articles/list',
         name: 'ArticleList',
-        component: Placeholder,
+        component: () => import('@/views/article/ArticleList.vue'),
         meta: { title: '文章列表', group: '文章管理', icon: 'Document', permission: 'article:view' }
       },
       {
         path: 'articles/mine',
         name: 'ArticleMine',
-        component: Placeholder,
+        component: () => import('@/views/article/ArticleMine.vue'),
         meta: { title: '我的投稿', group: '文章管理', icon: 'EditPen', permission: 'article:view' }
       },
       {
         path: 'articles/audit',
         name: 'ArticleAudit',
-        component: Placeholder,
+        component: () => import('@/views/article/ArticleAudit.vue'),
         meta: { title: '待我审核', group: '文章管理', icon: 'Stamp', permission: 'article:audit' }
+      },
+      /*
+       * 下面三条是 F06 的"非菜单页"：写文章 / 编辑 / 详情。
+       * 用 meta.hidden 让它们不进侧边栏 —— 它们是从列表页点进来的，
+       * 放在菜单里反而会让人以为"这里能直接写文章"（点进去其实是空表单）。
+       *
+       * ⚠️ 权限码用得上 article:create / article:update 的都写了：
+       *    写文章需要 article:create，编辑需要 article:update。
+       *    详情页只声明 article:view。
+       *    这三个码在库表 sys_permission 里都存在（不像 §1.3 的 article:edit）。
+       */
+      {
+        path: 'articles/create',
+        name: 'ArticleCreate',
+        component: () => import('@/views/article/ArticleEdit.vue'),
+        meta: { title: '写文章', hidden: true, permission: 'article:create' }
+      },
+      {
+        path: 'articles/edit/:id',
+        name: 'ArticleEdit',
+        component: () => import('@/views/article/ArticleEdit.vue'),
+        meta: { title: '编辑文章', hidden: true, permission: 'article:update' }
+      },
+      {
+        path: 'articles/detail/:id',
+        name: 'ArticleDetail',
+        component: () => import('@/views/article/ArticleDetail.vue'),
+        meta: { title: '文章详情', hidden: true, permission: 'article:view' }
       },
       // ---------------- 内容分类与标签（成员B） ----------------
       {
