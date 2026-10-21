@@ -28,15 +28,32 @@
 <mapper namespace="com.lab.cms.mapper.CmsArticleMapper">
 
     <!--
-        TODO(S09) 按关键字模糊检索文章的 id 与标题。
+        按关键字模糊检索文章的 id 与标题（S09 补齐，S07 只留了 TODO）。
 
-        设计要点（补实现时遵守）：
-          1. 只 SELECT id, title 两列，不取 content（LONGTEXT，全查浪费带宽）
-          2. 必须有 AND deleted = 0
-          3. 关键字用 CONCAT('%', #{keyword}, '%') 拼接，不要用 ${} 拼接字符串
-             —— ${} 是直接文本替换，会引入 SQL 注入
-          4. 可选：关键字为 null / 空白串时直接返回空列表或全量（由 Service 决定）
+        ⚠️ 三条硬规则，逐条都能说出理由：
+          1. 只 SELECT id, title 两列，不取 content（LONGTEXT）——
+             全列查询会把整篇正文拖回来，浪费带宽与内存，而这个方法的使用场景
+             （站点内检索下拉提示）只需要 id + title 两个字段。
+          2. 必须自己写 AND deleted = 0 —— 见文件头与 CmsArticleMapper 类注释：
+             @TableLogic 只作用于 MP 自动生成的 SQL，XML 是原样执行的，
+             漏掉这一句会查出已删除的文章，且**不报任何错**。
+          3. 关键字用 CONCAT('%', #{keyword}, '%')，绝不用 ${}
+             —— ${} 是文本直接替换，会把入参拼进 SQL 文本，是最典型的注入面。
+             这里 #{keyword} 走 PreparedStatement 占位符，安全。
 
-        留空是有意为之 —— S07 不做业务实现。
+        为什么显式写 LIMIT 100：
+          本方法没有分页参数，若不加限制，模糊匹配到 10 万行就会全部拖回内存。
+          这里用固定上限做兜底（检索下拉提示场景 100 条足够）；
+          真正的分页检索走的是另一条路（Service 侧的 PageQuery + PageResult），
+          不在本方法职责内 —— 这样区分是为了让"没有分页能力的查询"不可能被误用于列表页。
     -->
+    <select id="selectIdTitleByKeyword" resultType="com.lab.cms.entity.CmsArticle">
+        SELECT id,
+               title
+        FROM cms_article
+        WHERE deleted = 0
+          AND title LIKE CONCAT('%', #{keyword}, '%')
+        ORDER BY id DESC
+        LIMIT 100
+    </select>
 </mapper>

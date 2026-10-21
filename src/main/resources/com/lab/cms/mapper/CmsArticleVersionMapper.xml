@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    CmsArticleVersionMapper 的 XML 映射文件（S09 新建）。
+
+    ⚠️ 路径必须与接口包名一致：
+      接口 com.lab.cms.mapper.CmsArticleVersionMapper
+      XML  src/main/resources/com/lab/cms/mapper/CmsArticleVersionMapper.xml
+      （MybatisConfig 里的扫描路径是 classpath*:com/lab/cms/mapper/*.xml）
+
+    ⚠️ 手写 SQL 必须自己加 deleted = 0！
+      cms_article_version 的 deleted 列也标了 @TableLogic，
+      但 @TableLogic 只对 MP 自动生成的 SQL 生效（selectById / insert / selectList ...）。
+      XML 里的 SQL 原样执行，不加这一句就会把已软删的快照也算进 MAX(version_no)。
+      后果不是"多显示几行"，而是**取到一个已被占用的版本号**，
+      随后 INSERT 撞唯一索引 uk_article_version 失败 ——
+      症状离原因很远，是最难查的一类。
+-->
+<mapper namespace="com.lab.cms.mapper.CmsArticleVersionMapper">
+
+    <!--
+        查某篇文章当前的最大版本号；无快照时返回 0（IFNULL 兜底，见接口 Javadoc）。
+
+        ⚠️ AND deleted = 0 是必需的，理由见文件头。
+
+        为什么 resultType 写 Integer 而不是 Long：
+          version_no 列是 INT（最大约 21 亿），Integer 足够且与实体字段类型一致；
+          用 Long 会让调用方以为可能存在超出 int 的版本号，传递错误信息。
+    -->
+    <select id="selectMaxVersionNo" resultType="java.lang.Integer">
+        SELECT IFNULL(MAX(version_no), 0)
+        FROM cms_article_version
+        WHERE article_id = #{articleId}
+          AND deleted = 0
+    </select>
+
+</mapper>

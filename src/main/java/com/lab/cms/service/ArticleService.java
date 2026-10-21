@@ -3,6 +3,7 @@ package com.lab.cms.service;
 import com.lab.cms.base.BaseService;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
+import com.lab.cms.vo.BatchSubmitResultVO;
 
 import java.util.List;
 
@@ -118,8 +119,27 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * <b>这里保持 {@code void} 是为了先让接口编译通过、让 Controller 能对接，
      * 不代表最终形态。</b>改动会在 S09 明确记录，不静默变更契约。
      *
+     * <h3>✅ S09 落实情况（本条即"明确记录"本身）</h3>
+     * <p>返回类型已由 {@code void} 改为 {@link BatchSubmitResultVO}，
+     * 字段为 {@code total / successCount / failCount / failList}，
+     * 其中 {@code failList} 的元素是 {@code {id, reason}}。
+     * 这是 S07→S09 之间**唯一一处接口签名变更**，其余方法签名一律未动。
+     *
+     * <p>为什么是 {@code BatchSubmitResultVO} 而不是手册里写的
+     * {@code {successCount, failList}} 两个字段：多出的 {@code total} 用来表达
+     * "去重后实际处理了几条"，多出的 {@code failCount} 是为了避免前端自己写减法。
+     * 三个计数之间的关系是 {@code total = successCount + failCount}（有断言测试保证）。
+     *
+     * <p>⚠️ 顺带修正一处契约漂移：{@code docs/接口契约.md} §4.1 的示例片段里
+     * 这个接口写成了 {@code Result<Integer> batchSubmit(dto.getIds())}
+     * —— 既没有 {@code operatorId} 参数（会导致越权校验拿不到操作人），
+     * 返回值也只是个 {@code Integer}（表达不了逐条失败原因）。
+     * 那段代码的用途是"演示 {@code @RequirePermission} 怎么写"，
+     * 不是接口定义，故以本接口为准；已在实测记录里登记该差异。
+     *
      * @param ids        文章 ID 列表
      * @param operatorId 操作人 ID（每一篇都必须是该作者的，越权的那些记为失败）
+     * @return 逐条结果（去重后的总数 / 成功数 / 失败数 / 失败明细）
      */
-    void batchSubmit(List<Long> ids, Long operatorId);
+    BatchSubmitResultVO batchSubmit(List<Long> ids, Long operatorId);
 }
