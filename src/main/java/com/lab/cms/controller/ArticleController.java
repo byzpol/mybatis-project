@@ -5,6 +5,7 @@ import com.lab.cms.annotation.RequirePermission;
 import com.lab.cms.base.BaseController;
 import com.lab.cms.common.enums.OperType;
 import com.lab.cms.common.result.Result;
+import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.BatchSubmitDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.service.ArticleService;
@@ -20,7 +21,7 @@ import org.springframework.web.bind.annotation.RestController;
 import javax.validation.Valid;
 
 /**
- * 文章接口（S09 建立，本步只含"草稿与投稿"四个）。
+ * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个）。
  *
  * <h3>本类只做四件事</h3>
  * <p>收参 → 交给 {@code @Valid} 校验 → 调 Service → 封装 {@code Result}。
@@ -146,5 +147,40 @@ public class ArticleController extends BaseController {
     @OperLog(module = "文章管理", type = OperType.UPDATE, desc = "批量提交初审")
     public Result<BatchSubmitResultVO> batchSubmit(@RequestBody @Valid BatchSubmitDTO dto) {
         return Result.success(articleService.batchSubmit(dto.getIds(), requireCurrentUserId()));
+    }
+
+    /**
+     * 审核（编辑初审 / 主编终审共用）。
+     *
+     * <p>{@code POST /api/v1/articles/{id}/audit}，幂等性：<b>否</b>。
+     * 重复审核第二次会因"状态已推进到下一环节"被拒（11002）——
+     * 与"提交"同理，明确报错比静默成功好。
+     *
+     * <h3>为什么初审和终审是同一个 URL，而不是 /audit/first 与 /audit/final</h3>
+     * <p>契约（§4.1 第 8 项及其下的说明）已经定了这一条：<b>环节由文章当前状态决定</b>。
+     * 若拆成两个 URL，前端就得"先查一次状态、再选 URL"，既多一次请求，
+     * 也会产生竞态（查到状态后、发审核请求前，别人把状态推进了）。
+     * 所以请求体里<b>没有</b> auditStage 字段 —— 详见
+     * {@link ArticleAuditDTO} 的类注释（那里也登记了手册要求传 stage 的差异）。
+     *
+     * <h3>权限只要求 {@code article:audit}</h3>
+     * <p>初审与终审<b>不在这里区分权限</b>。两者的差别是"谁能把文章推到下一环节"，
+     * 而"这一步该不该轮到我"由 Service 按当前状态判断。
+     * 将来若确实需要"只有主编能终审"，那属于功能权限的细化，
+     * 应当在 {@code sys_role_permission} 那一层表达，而不是在本方法里写 if。
+     *
+     * <h3>为什么本接口的 {@code @OperLog} 保留参数记录</h3>
+     * <p>与草稿的"新建/修改"不同（那两个 {@code saveParams = false}，因为正文是 LONGTEXT）。
+     * 审核的参数是 {@code {auditAction, auditOpinion}}，其中<b>审核意见本身就是要留档的东西</b>
+     * —— 排查"这条稿子为什么被驳回"时，日志表里的意见比流水表更早被查到。
+     * 单个意见最长 500 字，不构成撑爆日志表的风险，因此保持默认的记录参数。
+     */
+    @PostMapping("/{id}/audit")
+    @RequirePermission("article:audit")
+    @OperLog(module = "文章管理", type = OperType.AUDIT, desc = "审核文章")
+    public Result<Void> audit(@PathVariable("id") Long id,
+                              @RequestBody @Valid ArticleAuditDTO dto) {
+        articleService.audit(id, dto, requireCurrentUserId());
+        return Result.<Void>success("审核完成", null);
     }
 }

@@ -6,11 +6,16 @@ import com.lab.cms.base.BaseServiceImpl;
 import com.lab.cms.common.ArticleStateMachine;
 import com.lab.cms.common.enums.ArticleAction;
 import com.lab.cms.common.enums.ArticleStatus;
+import com.lab.cms.common.enums.AuditResultEnum;
+import com.lab.cms.common.enums.AuditStageEnum;
 import com.lab.cms.common.exception.BusinessException;
 import com.lab.cms.common.exception.ErrorCode;
+import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
+import com.lab.cms.entity.CmsArticleAuditLog;
 import com.lab.cms.entity.CmsArticleVersion;
+import com.lab.cms.mapper.CmsArticleAuditLogMapper;
 import com.lab.cms.mapper.CmsArticleMapper;
 import com.lab.cms.mapper.CmsArticleVersionMapper;
 import com.lab.cms.service.ArticleService;
@@ -54,6 +59,15 @@ import java.util.List;
  *       因为 {@code updateById} 会跳过 null 字段，"清空摘要"会返回成功却什么都不改。
  *       这是本步实测抓到的静默失效，详见 {@link #updateEditableColumns}。</li>
  * </ol>
+ *
+ * <h3>S10 追加：{@link #audit}</h3>
+ * <p>审核（编辑初审 / 主编终审）合并成<b>一个</b>方法实现，环节由当前状态反推，
+ * 与 {@link #submitForAudit} 共用同一套"查文章 → 校验 → 状态机推进 → 写表"的骨架。
+ * 两条与手册的差异都在方法注释里写明了：
+ * ① 步骤顺序改为"先改状态、后写流水"（为了让"两个写操作在同一事务"这条不变式可测）；
+ * ② 不做"该阶段已审核过"的存在性检查（按字面实现会打断"驳回 → 改稿 → 再审"的主链路）。
+ * <p>⚠️ {@link #audit} <b>不创建</b>版本快照：审核不改内容，只改状态与写流水。
+ * 快照由创建 / 修改 / 提交三个动作负责（见 {@link #insertVersionSnapshot} 的调用点）。
  *
  * <h3>⚠️ 关于 {@code @Transactional}</h3>
  * <p>三个"改数据 + 写快照"的方法都加了
@@ -125,6 +139,16 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
      */
     @Autowired
     private CmsArticleVersionMapper versionMapper;
+
+    /**
+     * 审核流水 Mapper（S10 起使用）。
+     *
+     * <p>与 {@code versionMapper} 同理：这是"文章业务域里的另一张表"，
+     * 不是自己的 {@code baseMapper}（后者由父类持有），注入它不违反
+     * {@code BaseServiceImpl} 的"不要重复注入自己的 baseMapper"。
+     */
+    @Autowired
+    private CmsArticleAuditLogMapper auditLogMapper;
 
     /**
      * 本 Service 的**自身代理**，专供 {@link #batchSubmit} 使用。
@@ -395,6 +419,96 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         return result;
     }
 
+    // ==================== 五、审核（编辑初审 / 主编终审共用） ====================
+
+    /**
+     * 审核：{@code PENDING_EDITOR → {PENDING_CHIEF | REJECTED}}、
+     * {@code PENDING_CHIEF → {APPROVED | REJECTED}}。
+     *
+     * <p>环节由<b>当前状态</b>反推（见 {@link #resolveAuditStage}），
+     * 所以初审与终审走的是同一段代码，方法里没有任何 {@code if (stage == 1)} 式的分支。
+     *
+     * <h3>⚠️⚠️ 步骤顺序与手册不同：先改状态、后写流水（有意为之）</h3>
+     * <p>手册 S10 给的顺序是"5. 插审核流水 → 6. 更新文章状态"。
+     * 这里反过来。这不是笔误，原因是一条<b>能否被验证</b>的差别：
+     * <ul>
+     *   <li>手册自己也强调了这条不变式：<b>"写流水和改状态必须在同一事务里，
+     *       否则会出现状态改了但流水丢了"</b>。</li>
+     *   <li>若按手册顺序（先流水后状态），要在测试里制造"流水写完、状态改失败"的场景，
+     *       就必须让<b>状态更新</b>这一步失败 —— 而状态更新是
+     *       {@code updateById}，在没有并发干扰的情况下它不会失败，
+     *       只好去 mock 框架内部。等于这条不变式<b>测不了</b>。</li>
+     *   <li>反过来写（先状态后流水），只要让<b>流水插入</b>失败即可 ——
+     *       而流水插入的失败是<b>确定性、可构造</b>的：
+     *       给一个超过 500 字的 {@code opinion}，MySQL 严格模式
+     *       （本机 {@code sql_mode} 含 {@code STRICT_TRANS_TABLES}）会抛错误 1406。
+     *       跑完断言"状态仍停在 PENDING_EDITOR、且流水表没有新增行"，
+     *       才算真正证明了两个写操作在同一事务里。</li>
+     * </ul>
+     * <p>顺带还有一个好处：乐观锁冲突（{@code updateById} 返回 0）是<b>最先</b>被发现的，
+     * 此时还什么都没写，不会留下一条随后要被回滚的流水。
+     *
+     * <h3>驳回必填意见</h3>
+     * <p>在校验顺序上放在"状态推进"<b>之前</b>：驳回却不给理由，
+     * 是"这一请求本身就不完整"，应当在动任何数据之前就拒掉。
+     * <p>⚠️ 用 {@code StringUtils.hasText} 判断而不自己 {@code trim()}：
+     * {@code trim()} 会吃掉码点 ≤ U+0020 的控制字符（项目里已记过这个坑），
+     * 而 {@code hasText} 把"全空白"也算作空，正好是要的语义。
+     * 存库时用<b>原文</b>不改写 —— 审核意见是给人看的凭证，不该由程序悄悄改字。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void audit(Long id, ArticleAuditDTO dto, Long operatorId) {
+        // ① 查文章（不存在 → 11001）
+        CmsArticle article = requireArticle(id);
+        requireOperator(operatorId);
+
+        // ② 入参值域：auditAction 必须是 1 或 2。
+        //    @NotNull 只挡"没传"，挡不住"传了 3 / 999"，这里补第二道。
+        //    用 AuditResultEnum.isValid 而不是 result == 1 || result == 2：
+        //    值域只有一处定义（枚举），将来加"转办"之类的新结论也只改枚举。
+        if (dto == null || !AuditResultEnum.isValid(dto.getAuditAction())) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR,
+                    "审核结论只能是 1（通过）或 2（驳回）");
+        }
+
+        // ③ 由当前状态推环节；状态不在审核环节 → 11002（终态 → 11011）
+        AuditStageEnum stage = resolveAuditStage(article);
+
+        // ④ 业务级越权：作者不能审自己的稿 → 11004
+        checkNotSelfAudit(article, operatorId);
+
+        // ⑤ 驳回必填意见 → 11014（放在动数据之前）
+        boolean reject = AuditResultEnum.isReject(dto.getAuditAction());
+        if (reject && !StringUtils.hasText(dto.getAuditOpinion())) {
+            throw new BusinessException(ErrorCode.ARTICLE_AUDIT_OPINION_REQUIRED);
+        }
+
+        // ⑥ 状态推进走状态机。这里用 transfer 而不是 assertTransfer 的理由同 submitForAudit：
+        //    transfer 能区分 11001 / 11011 / 11002，提示指向真问题。
+        //    ⚠️ fromStatus 必须在 setStatus 之前取，否则日志会打成"目标状态 → 目标状态"。
+        ArticleStatus fromStatus = ArticleStatus.ofNullable(article.getStatus());
+        ArticleAction action = reject ? ArticleAction.AUDIT_REJECT : ArticleAction.AUDIT_PASS;
+        ArticleStatus target = ArticleStateMachine.transfer(article.getStatus(), action);
+
+        // ⑦ 改状态（乐观锁）。这里用 updateById 是安全的，与 updateDraft 的情形不同：
+        //    updateById 的已知缺陷是"跳过 null 字段"，而 status 一定非 null，
+        //    所以不存在"想清空某个字段却写不进去"的问题。
+        //    并发两个审核请求时，第二个会因 version 不匹配返回 0 → 11010。
+        article.setStatus(target.getCode());
+        if (baseMapper.updateById(article) == 0) {
+            throw new BusinessException(ErrorCode.ARTICLE_UPDATE_CONFLICT);
+        }
+
+        // ⑧ 写审核流水。放最后：它失败时状态会被同一事务回滚（见方法注释）。
+        insertAuditLog(article, stage, operatorId, dto.getAuditAction(), dto.getAuditOpinion());
+
+        String statusPath = (fromStatus == null ? "未知状态" : fromStatus.name()) + " → " + target.name();
+        log.info("审核完成 | articleId={} | 环节={} | 结论={} | {} | 审核人={}",
+                id, stage.getDescription(),
+                AuditResultEnum.getDesc(dto.getAuditAction()), statusPath, operatorId);
+    }
+
     // ==================== 私有工具 ====================
 
     /**
@@ -543,6 +657,122 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         }
         if (article.getCategoryId() == null) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "提交审核前请先选择文章分类");
+        }
+    }
+
+    /**
+     * 由文章当前状态反推"这次审核发生在哪个环节"。
+     *
+     * <h3>为什么不接受入参传环节</h3>
+     * <p>冗余入参 = 允许客户端声明"我认为现在是初审"，而这个声明与库里的状态
+     * 完全可能不一致；到时程序要么信客户端（错），要么不信（参数白传）。
+     * 环节由状态唯一决定，所以只在一处解析。
+     *
+     * <h3>为什么必须区分"终态"与"其余非法状态"</h3>
+     * <p>与被拒后的"下一步动作"有关：
+     * <ul>
+     *   <li>已归档（终态）→ {@code ARTICLE_ARCHIVED_READONLY(11011)}
+     *       "已归档的文章不可修改"：一句话说清，用户不用再想怎么办。</li>
+     *   <li>其余（草稿 / 已驳回 / 已发布 / 已撤回 / 已下架 / 定时中）→
+     *       {@code ARTICLE_STATUS_ILLEGAL(11002)} +
+     *       "文章当前状态为「X」，不在审核环节，无法审核"：
+     *       用户看了就知道"现在轮不到审核"。</li>
+     * </ul>
+     */
+    private AuditStageEnum resolveAuditStage(CmsArticle article) {
+        ArticleStatus status = ArticleStatus.ofNullable(article.getStatus());
+        if (status == null) {
+            // 库里出现 0~9 之外的码 → 脏数据。不抛 11002：
+            // 那会让用户以为是自己操作的问题，掩盖了数据异常，应走 ERROR 日志。
+            log.error("文章状态码异常（脏数据）| articleId={} | status={}",
+                    article.getId(), article.getStatus());
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,
+                    "文章状态异常，请联系管理员（articleId=" + article.getId() + "）");
+        }
+        if (status.isFinal()) {
+            throw new BusinessException(ErrorCode.ARTICLE_ARCHIVED_READONLY);
+        }
+        if (status == ArticleStatus.PENDING_EDITOR) {
+            return AuditStageEnum.EDITOR_FIRST;
+        }
+        if (status == ArticleStatus.PENDING_CHIEF) {
+            return AuditStageEnum.CHIEF_FINAL;
+        }
+        throw new BusinessException(ErrorCode.ARTICLE_STATUS_ILLEGAL,
+                String.format("文章当前状态为「%s」，不在审核环节，无法审核", status.getDescription()));
+    }
+
+    /**
+     * 审核越权校验：<b>不能审核自己创建的文章</b> → {@code ARTICLE_CANNOT_AUDIT_SELF(11004)}。
+     *
+     * <h3>为什么这条与 {@code checkOwnership} 的码不同（11004 vs 11003）</h3>
+     * <p>两者方向恰好相反，语义也不同：
+     * <ul>
+     *   <li>{@code checkOwnership}（改草稿 / 提交）要求"<b>必须</b>是作者本人"，
+     *       不是 → 11003「只能操作自己创建的文章」；</li>
+     *   <li>本方法要求"<b>绝不能</b>是作者本人"，是 → 11004「不能审核自己创建的文章」。</li>
+     * </ul>
+     * 用同一个码会让前端无法给出正确提示。
+     * <p>⚠️ 一处手册错位登记：手册 S10 说这条"抛 {@code ARTICLE_NOT_OWNER} 或新增一个业务码"。
+     * {@code ErrorCode} 里本来就有专为此场景准备的
+     * {@code ARTICLE_CANNOT_AUDIT_SELF(11004)}，不需要新增（主干禁止随意加码）。
+     *
+     * <p>⚠️ 用 {@code operatorId.equals(article.getAuthorId())} 而不是反过来：
+     * {@code authorId} 理论上可能为 null（库表是 NOT NULL，但脏数据不排除），
+     * 前者只是返回 false，后者会抛 NPE。防御式写法要选"不会炸"的那种。
+     */
+    private void checkNotSelfAudit(CmsArticle article, Long operatorId) {
+        if (operatorId.equals(article.getAuthorId())) {
+            log.warn("审核越权拦截（自审自稿）| articleId={} | authorId={} | 审核人={}",
+                    article.getId(), article.getAuthorId(), operatorId);
+            throw new BusinessException(ErrorCode.ARTICLE_CANNOT_AUDIT_SELF);
+        }
+    }
+
+    /**
+     * 写一条审核流水。
+     *
+     * <h3>为什么 {@code articleVersion} 取"最大版本号"而不是 {@code cms_article.version}</h3>
+     * <p>两者是完全不同的东西，容易混：
+     * <ul>
+     *   <li>{@code cms_article.version} 是 <b>MP 乐观锁</b>的版本号，每次更新 +1，
+     *       它衡量的是"这行被改过多少次"；</li>
+     *   <li>{@code cms_article_version.version_no} 是<b>业务版本快照</b>的编号
+     *       （创建草稿=1、改一次+1、提交再审+1），它衡量的是"第几版内容"。</li>
+     * </ul>
+     * 库表 {@code cms_article_audit_log.article_version} 的注释写明它对应的是
+     * {@code cms_article_version.version_no}，所以要取 MAX 快照号，
+     * 目的是钉死"这次审核通过的是第几版内容"。
+     *
+     * <p>⚠️ {@code selectMaxVersionNo} 可能返回 {@code null}（该文章一条快照都没有）。
+     * 库表该列可空，所以**不兜底成 0** —— 0 是一个看起来合法的版本号，
+     * 会把"没有快照"这个事实伪装成"第 0 版"。null 才是诚实的表达。
+     *
+     * <p>⚠️ {@code createBy / createTime} 等审计字段不在这里手工赋值：
+     * {@code CmsArticleAuditLog} <b>继承 BaseEntity</b>（库表五列齐全），
+     * 有 {@code @TableField(fill = ...)} 标注，由 {@code AuditMetaObjectHandler} 填充。
+     * 这与 {@link #insertVersionSnapshot} 的处理<b>刻意不同</b> ——
+     * 那张表不继承 BaseEntity，没有任何 fill 标注，所以才必须显式赋值。
+     * <b>判据永远是"这个实体有没有 fill 标注"，不是"这张表重不重要"。</b>
+     */
+    private void insertAuditLog(CmsArticle article, AuditStageEnum stage,
+                                Long operatorId, Integer result, String opinion) {
+        CmsArticleAuditLog logEntity = new CmsArticleAuditLog();
+        logEntity.setArticleId(article.getId());
+        logEntity.setAuditStage(stage.getCode());
+        logEntity.setAuditorId(operatorId);
+        logEntity.setResult(result);
+        logEntity.setOpinion(opinion);
+        // audit_time 是"业务时间"（用户点下按钮的那一刻），与 createTime（入库时间）语义不同，
+        // 显式给上；前端审核时间线展示的是这一列。
+        logEntity.setAuditTime(LocalDateTime.now());
+        logEntity.setArticleVersion(versionMapper.selectMaxVersionNo(article.getId()));
+
+        int rows = auditLogMapper.insert(logEntity);
+        if (rows != 1) {
+            // 正常 insert 必返回 1。走到这里说明数据库层面异常，
+            // 抛系统错误让整个事务回滚（这个事务同时管着刚才那次状态更新）。
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "审核流水写入失败，请稍后重试");
         }
     }
 

@@ -1,6 +1,7 @@
 package com.lab.cms.service;
 
 import com.lab.cms.base.BaseService;
+import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.vo.BatchSubmitResultVO;
@@ -142,4 +143,83 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * @return 逐条结果（去重后的总数 / 成功数 / 失败数 / 失败明细）
      */
     BatchSubmitResultVO batchSubmit(List<Long> ids, Long operatorId);
+
+    /**
+     * 审核：编辑初审与主编终审<b>共用这一个方法</b>（S10 初审 / S11 终审同一段实现）。
+     *
+     * <h3>为什么要合并成一个方法，而不是 {@code auditFirst} + {@code auditFinal}</h3>
+     * <p>手册 S11 也要求"两段逻辑合并成一段统一实现，如果无法合并要说明为什么"。
+     * 这里可以合并，而且必须合并 —— 因为两个环节<b>除了"从哪个状态出发、到哪个状态去"之外，
+     * 其余每一步完全相同</b>：查文章、推环节、防自审、驳回校意见、状态机推进、写流水。
+     * 唯一会变的那部分（状态流转）已经全部封装在
+     * {@link ArticleStateMachine#transfer(Integer, com.lab.cms.common.enums.ArticleAction)}
+     * 的静态表里了，本方法不需要知道"初审能到哪、终审能到哪"。
+     * <p>反过来，如果拆成两个方法，上面那五步会被复制两份 ——
+     * 于是"某天给审核加一条规则（比如加一个敏感词校验）"就会漏改一处。
+     * 这是项目最忌讳的"同一规则散在多处"。
+     *
+     * <h3>环节从哪里来：由文章<b>当前状态</b>反推，不由入参传</h3>
+     * <p>{@code PENDING_EDITOR} → 编辑初审；{@code PENDING_CHIEF} → 主编终审。
+     * 原因见 {@link com.lab.cms.dto.ArticleAuditDTO} 的类注释（冗余入参必然打架，
+     * 且前端已按"不传 stage"实现）。
+     * <p>状态不在这两者时：终态（已归档）→ {@code ARTICLE_ARCHIVED_READONLY(11011)}；
+     * 其余（草稿 / 已驳回 / 已发布 / 已撤回 / 已下架 / 定时中）→
+     * {@code ARTICLE_STATUS_ILLEGAL(11002)}。
+     *
+     * <h3>权限与越权</h3>
+     * <ul>
+     *   <li><b>功能权限</b>（{@code article:audit}）：由 Controller 上的
+     *       {@code @RequirePermission} + {@code PermissionAspect} 完成，
+     *       本方法<b>不重复校验</b> —— 同一份权限规则写两遍，改的时候必然漏一处。</li>
+     *   <li><b>业务级越权</b>（作者不能审自己的稿）：这一条<b>必须</b>在本方法里做。
+     *       它不是"有没有 article:audit 权限"的问题 —— 编辑和主编<b>都有</b>这个权限，
+     *       拦住他们的是"这篇稿子是不是你自己写的"。
+     *       命中抛 {@code ARTICLE_CANNOT_AUDIT_SELF(11004)}。</li>
+     * </ul>
+     *
+     * <h3>⚠️ 为什么本方法<b>不</b>做"该阶段已审核过"的存在性检查</h3>
+     * <p>{@code CmsArticleAuditLog} 的类注释把"防重复审核"列为这张表的用途之一，
+     * 实现方式写的是"查 (article_id, audit_stage) 是否已有记录，有则拒绝"。
+     * <b>按字面实现会打断主链路</b>，所以这里没有照做：
+     * <pre>
+     *   提交 → 初审驳回（写入 stage=1 的流水）→ 作者改稿 → 再次提交
+     *   → 初审（此时 (article_id, 1) 已经有记录了 → 被误判为"重复审核"）
+     * </pre>
+     * 而"初审驳回 → 改稿 → 再初审"正是 S11 主链路自测清单里必须走通的一步。
+     * <p>真正拦住重复审核的是<b>状态机 + 乐观锁</b>，而且这里比"查流水"更彻底：
+     * <b>"在同一个环节上审两次"在结构上就不存在</b> ——
+     * 审核成功后状态必然改变（通过则进下一环节、驳回则回 {@code REJECTED}），
+     * 于是第二次调用会被推导成<b>另一个环节</b>（初审通过后再调 = 主编终审），
+     * 而不是"同一环节重复"。
+     * 想让状态回到 {@code PENDING_EDITOR}，只能走"驳回 → 作者改稿 → 重新提交"，
+     * 那是新的一轮审核。
+     * 并发的两个重复请求则由乐观锁兜住：第二个 {@code version} 不匹配 → 11010。
+     * <p>（第一版注释里曾写"初审通过后再调初审会因状态不支持而 11002"，
+     * 那是错的 —— 实测跑出来它会当成终审并成功。以本条为准。）
+     *
+     * <h3>⚠️ 已知缺口（挂起待定，需组内定）</h3>
+     * <p>因为"环节由状态推导"、且库里文章域<b>只有一个</b> {@code article:audit} 权限码
+     * （没有 first / final 之分），<b>任何持有 {@code article:audit} 的账号都能把一篇文章
+     * 从初审一路审到 {@code APPROVED}</b> —— 编辑（{@code ROLE_EDITOR}）
+     * 与主编（{@code ROLE_CHIEF}）都有这个权限，所以编辑也能做终审。
+     * 也就是说"初审归编辑、终审归主编"这条业务分工<b>在当前权限模型里表达不出来</b>。
+     * <p>本步<b>刻意不擅自修</b>：这既不是 S10 手册要求（手册只要求"作者不能审自己的稿"），
+     * 也会改动权限模型（属成员C 的主责范围）。两条候选方案都已登记在
+     * {@code docs/S10-审核与流水实测记录.md} 的"挂起待定"一节：
+     * ① 在 {@code sys_permission} 增加 {@code article:audit:final}；
+     * ② 增加"同一篇文章初审人与终审人不能同一人"的规则（四眼原则）。
+     * <p>证据在测试 {@code ArticleAuditServiceTest#testSecondAuditCallBecomesFinalAuditNotDuplicate()}。
+     *
+     * <h3>事务边界（与手册的一个有意差异，见实现处注释）</h3>
+     * <p>本方法加 {@code @Transactional(rollbackFor = Exception.class)}：
+     * "改状态"与"写流水"必须同成功或同失败。
+     * 手册给的步骤顺序是"先写流水、后改状态"；实现里<b>把顺序反了过来</b>
+     * （先改状态、后写流水），理由写在实现里 —— 简言之，
+     * 这个顺序才能把手册自己担心的"状态改了但流水丢了"这条不变式<b>测出来</b>。
+     *
+     * @param id         文章 ID
+     * @param dto        审核入参（{@code auditAction} 1 通过 / 2 驳回；驳回时 {@code auditOpinion} 必填）
+     * @param operatorId 审核人 ID，由 Controller 从登录态取出后传入
+     */
+    void audit(Long id, ArticleAuditDTO dto, Long operatorId);
 }
