@@ -4,7 +4,9 @@ import com.lab.cms.base.BaseService;
 import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
+import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
+import com.lab.cms.vo.CmsArticleDetailVO;
 
 import java.util.List;
 
@@ -222,4 +224,51 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * @param operatorId 审核人 ID，由 Controller 从登录态取出后传入
      */
     void audit(Long id, ArticleAuditDTO dto, Long operatorId);
+
+    /**
+     * 查询文章详情：基本信息 + 正文 + 最近驳回意见 + 审核流水。
+     *
+     * <h3>⚠️ 这个接口的硬指标是"SQL 条数"</h3>
+     * <p>手册 S11 的核查项要求"详情接口只发 3~4 条 SQL，不是 N+1"。
+     * 详情要跨三张表补数据（作者名、分类名、流水里的审核人名），
+     * 最容易的写法是"循环里逐条查"，那会变成 1 + N + N + N 条。
+     * 本实现的定式是<b>"收集 id → 一次 {@code IN} 查回 → 内存拼装"</b>：
+     * <ol>
+     *   <li>查文章本身（1 条）</li>
+     *   <li>查作者昵称（1 条，{@code sys_user} 批量）</li>
+     *   <li>查分类名（1 条，{@code cms_category} 批量）</li>
+     *   <li>查审核流水（1 条）</li>
+     *   <li>查流水里涉及的审核人昵称（1 条，去重后批量）</li>
+     * </ol>
+     * 即 <b>4~5 条</b>，且条数与文章数量无关。
+     * 实测条数由真机联调时读 {@code logs/cms.log} 的 {@code Preparing:} 行确认
+     * （这是本项目验证 SQL 行为的唯一可靠判据）。
+     *
+     * <p>⚠️ 查询<b>不做</b>越权过滤：{@code article:view} 是"能看文章"的功能权限，
+     * 详情页本身也是公开信息的载体。数据级权限（比如"草稿只有作者能看"）
+     * 属于更细的规则，手册在 S12 才会谈，本步不擅自加。
+     *
+     * @param id 文章 ID
+     * @return 详情 VO；文章不存在时抛 {@code ARTICLE_NOT_FOUND(11001)}
+     */
+    CmsArticleDetailVO getDetail(Long id);
+
+    /**
+     * 只查审核流水（给审核工作台单独刷新用）。
+     *
+     * <h3>为什么详情已经带流水了，还要单独开一个接口</h3>
+     * <p>因为两者的"刷新粒度"不同：
+     * 审核人点一次"通过"之后只需要刷新流水与状态，<b>没必要把整篇正文再拉一遍</b>
+     * （正文是 LONGTEXT，可能几百 KB）。
+     * {@code ArticleDetail.vue} 实测就是调这个接口来刷流水的，
+     * 该页面自己注释了原因："流水单独取一次，不必为了看几条流水把整篇正文再拉一遍"。
+     *
+     * <p>⚠️ 仍然要先查一次文章是否存在 —— 否则对不存在的 id 会返回"空流水列表"，
+     * 前端会显示一个"文章不存在但审核历史为空"的怪页面，而正确做法是明确的 11001。
+     * 这一次额外查询是刻意的，不是"多余的一条 SQL"。
+     *
+     * @param id 文章 ID
+     * @return 按 {@code auditTime} 正序的流水；没有记录时返空列表（不是 null）
+     */
+    List<ArticleAuditLogVO> listAuditLogs(Long id);
 }

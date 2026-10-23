@@ -15,11 +15,18 @@ import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.entity.CmsArticleAuditLog;
 import com.lab.cms.entity.CmsArticleVersion;
+import com.lab.cms.entity.CmsCategory;
+import com.lab.cms.entity.SysUser;
 import com.lab.cms.mapper.CmsArticleAuditLogMapper;
 import com.lab.cms.mapper.CmsArticleMapper;
 import com.lab.cms.mapper.CmsArticleVersionMapper;
+import com.lab.cms.mapper.CmsCategoryMapper;
+import com.lab.cms.mapper.SysUserMapper;
 import com.lab.cms.service.ArticleService;
+import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
+import com.lab.cms.vo.CmsArticleDetailVO;
+import com.lab.cms.vo.CmsArticleVO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,8 +39,13 @@ import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 文章业务服务实现。
@@ -149,6 +161,23 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
      */
     @Autowired
     private CmsArticleAuditLogMapper auditLogMapper;
+
+    /**
+     * 用户 Mapper（S11 起使用），只为补 {@code authorName} / {@code auditorName}。
+     *
+     * <p>⚠️ 只调用 MP 自带的 {@code selectBatchIds}（一次 {@code IN} 查询），
+     * 绝不在循环里 {@code selectById} —— 那是典型的 N+1，
+     * 而"详情接口只发 3~4 条 SQL"正是本步的硬指标。
+     */
+    @Autowired
+    private SysUserMapper userMapper;
+
+    /**
+     * 分类 Mapper（S11 起使用），只为补 {@code categoryName}。
+     * <p>{@code cms_article} 表里只有 {@code category_id}，分类名必须查这张表。
+     */
+    @Autowired
+    private CmsCategoryMapper categoryMapper;
 
     /**
      * 本 Service 的**自身代理**，专供 {@link #batchSubmit} 使用。
@@ -507,6 +536,228 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         log.info("审核完成 | articleId={} | 环节={} | 结论={} | {} | 审核人={}",
                 id, stage.getDescription(),
                 AuditResultEnum.getDesc(dto.getAuditAction()), statusPath, operatorId);
+    }
+
+    // ==================== 六、详情与审核流水查询（S11） ====================
+
+    /**
+     * 文章详情：基本信息 + 正文 + 作者名 + 分类名 + 审核流水 + 最近驳回意见。
+     *
+     * <h3>SQL 只用 4 条（"3~4 条"这条核查项的落实方式）</h3>
+     * <pre>
+     *   ① SELECT ... FROM cms_article            WHERE id = ?                  （requireArticle）
+     *   ② SELECT ... FROM cms_article_audit_log  WHERE article_id = ?          （查流水）
+     *   ③ SELECT ... FROM sys_user              WHERE id IN (作者 ∪ 审核人)     （一次批量，去重）
+     *   ④ SELECT ... FROM cms_category          WHERE id = ?                   （分类名）
+     * </pre>
+     * <p>关键在 ③：<b>把"作者"和"流水里的审核人"合并成一次 {@code IN} 查询</b>。
+     * 若分成两次（作者一次、审核人一次），就是 5 条；
+     * 若在循环里逐条查审核人，就是 1 + N 条。
+     * <p>条数与文章长度、审核次数<b>无关</b>（审核人先去重再查），
+     * 这才是"没有 N+1"的判据 —— 光看"这次跑了 4 条"不足以证明，
+     * 要看"流水 0 条和 5 条时 SQL 条数一样"。
+     *
+     * <h3>⚠️ 实测修正：常态就是 4 条，不是 3 条</h3>
+     * <p>本方法的第一版注释写过"草稿没流水时只有 3 条"——<b>这是错的</b>，
+     * 真机实测（S11 联调，读 {@code cms.log} 的 {@code Preparing:}）：
+     * 空流水草稿也是 <b>4</b> 条。原因是 ③ 的集合里<b>永远至少有"作者"</b>
+     * （{@code authorId} 非空），所以 {@code sys_user} 那条查询不会被省掉；
+     * 而作者名正是详情页要显示的东西，省掉反而是错的。
+     * <p>真正会出现 3 条的唯一情形是 ④ 也省掉，即 {@code categoryId = null}
+     * （此时 {@link #selectCategoryName} 直接返回 null 不发 SQL）。
+     * <p>结论：<b>把"4 条"当常数来断言</b>，3 条只是 {@code categoryId} 缺失时的特例。
+     */
+    @Override
+    public CmsArticleDetailVO getDetail(Long id) {
+        // ① 文章本身（不存在 → 11001）
+        CmsArticle article = requireArticle(id);
+
+        CmsArticleDetailVO vo = new CmsArticleDetailVO();
+        copyBaseFields(article, vo);
+        vo.setContent(article.getContent());
+
+        // ② 流水
+        List<CmsArticleAuditLog> rows = selectAuditLogs(id);
+
+        // ③ 作者 + 审核人，合并成一次 IN 查询
+        Set<Long> userIds = new LinkedHashSet<>();
+        if (article.getAuthorId() != null) {
+            userIds.add(article.getAuthorId());
+        }
+        for (CmsArticleAuditLog row : rows) {
+            if (row.getAuditorId() != null) {
+                userIds.add(row.getAuditorId());
+            }
+        }
+        Map<Long, String> nicknames = selectNicknames(userIds);
+
+        vo.setAuthorName(article.getAuthorId() == null ? null : nicknames.get(article.getAuthorId()));
+        vo.setAuditLogs(toAuditLogVOs(rows, nicknames));
+        vo.setRejectReason(lastRejectOpinion(vo.getAuditLogs()));
+
+        // ④ 分类名（cms_article 里只有 category_id）
+        vo.setCategoryName(selectCategoryName(article.getCategoryId()));
+
+        log.debug("查询文章详情 | articleId={} | 流水 {} 条 | 关联用户 {} 个",
+                id, rows.size(), nicknames.size());
+        return vo;
+    }
+
+    /**
+     * 只查审核流水（供审核工作台单独刷新）。
+     *
+     * <p>SQL 3 条：① 文章是否存在（不存在要明确 11001，不能返回空列表）
+     * ② 流水 ③ 审核人昵称批量。
+     */
+    @Override
+    public List<ArticleAuditLogVO> listAuditLogs(Long id) {
+        // 这一次查询刻意保留：否则对不存在的 id 会返回"空流水"，
+        // 前端会显示"文章不存在但审核历史为空"这种自相矛盾的页面。
+        requireArticle(id);
+
+        List<CmsArticleAuditLog> rows = selectAuditLogs(id);
+        Set<Long> auditorIds = new LinkedHashSet<>();
+        for (CmsArticleAuditLog row : rows) {
+            if (row.getAuditorId() != null) {
+                auditorIds.add(row.getAuditorId());
+            }
+        }
+        return toAuditLogVOs(rows, selectNicknames(auditorIds));
+    }
+
+    /**
+     * 查某篇文章的全部审核流水，<b>按 {@code audit_time} 正序</b>。
+     *
+     * <h3>⚠️ 为什么必须加第二排序键 {@code id}</h3>
+     * <p>库表 {@code audit_time} 是 {@code DATETIME}（秒精度，没有小数位）。
+     * 主链路自测里"提交 → 初审 → 终审"往往发生在<b>同一秒内</b>，
+     * 只按 {@code audit_time} 排序时这几条的时间完全相同，
+     * MySQL 返回的先后顺序<b>不确定</b>（取决于执行计划与物理存储顺序）。
+     * 于是"第一条是不是初审"这类断言会偶发失败 —— 最难查的一类问题。
+     * <p>加 {@code id} 作为第二键（{@code id} 自增，天然等于插入顺序）后顺序就确定了。
+     * 这里没有用"把 audit_time 改成毫秒精度"的方案，因为那要改库表，
+     * 而"自增主键就是发生顺序"是个更朴素可靠的保证。
+     */
+    private List<CmsArticleAuditLog> selectAuditLogs(Long articleId) {
+        return auditLogMapper.selectList(
+                Wrappers.<CmsArticleAuditLog>lambdaQuery()
+                        .eq(CmsArticleAuditLog::getArticleId, articleId)
+                        .orderByAsc(CmsArticleAuditLog::getAuditTime)
+                        .orderByAsc(CmsArticleAuditLog::getId));
+    }
+
+    /**
+     * 一次 {@code IN} 查询批量取昵称，返回 {@code id → nickname}。
+     *
+     * <p>⚠️ 空集合必须<b>提前返回</b>：{@code selectBatchIds(emptyCollection)} 会生成
+     * {@code WHERE id IN ()}，这在 MySQL 里是<b>语法错误</b>（不是"查不到"）。
+     * 这是个很容易漏的边界 —— 草稿文章没有任何审核流水时正好会走到这里。
+     *
+     * <p>返回空 Map 而不是 null，调用方直接 {@code get(id)} 即可，不用判空。
+     */
+    private Map<Long, String> selectNicknames(Collection<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<SysUser> users = userMapper.selectBatchIds(userIds);
+        Map<Long, String> map = new HashMap<>(Math.max(4, users.size() * 2));
+        for (SysUser user : users) {
+            // ⚠️ 这里顺手做了逻辑删除过滤以外的兜底：selectBatchIds 会自动加 deleted = 0，
+            // 所以已删除的用户查不出来，nickname 就是 null。刻意不编造"已注销用户"，
+            // 让数据问题显式暴露（前端模板已有 `|| '—'` 兜底）。
+            map.put(user.getId(), user.getNickname());
+        }
+        return map;
+    }
+
+    /** 取分类名；{@code categoryId} 为空或分类不存在时返回 null。 */
+    private String selectCategoryName(Long categoryId) {
+        if (categoryId == null) {
+            return null;
+        }
+        CmsCategory category = categoryMapper.selectById(categoryId);
+        return category == null ? null : category.getCategoryName();
+    }
+
+    /**
+     * 流水实体 → VO（含中文文案）。
+     *
+     * <p>{@code auditStageDesc} / {@code resultDesc} 在这里由枚举填好，
+     * 而不是丢给前端映射：枚举里的文案是唯一的真相源，
+     * 前端再造一份就必然出现"后端改了文案前端没跟上"。
+     * <p>枚举的 {@code getDesc} 对未知码返回"未知环节/未知结论"而不是抛异常 ——
+     * 因为库里可能有人手工改过数据，<b>一条脏流水不该让整个详情接口 500</b>。
+     */
+    private List<ArticleAuditLogVO> toAuditLogVOs(List<CmsArticleAuditLog> rows,
+                                                  Map<Long, String> nicknames) {
+        if (rows == null || rows.isEmpty()) {
+            // 空列表而非 null：前端不用写 `|| []` 兜底
+            return new ArrayList<>();
+        }
+        List<ArticleAuditLogVO> list = new ArrayList<>(rows.size());
+        for (CmsArticleAuditLog row : rows) {
+            ArticleAuditLogVO vo = new ArticleAuditLogVO();
+            vo.setId(row.getId());
+            vo.setAuditStage(row.getAuditStage());
+            vo.setAuditStageDesc(AuditStageEnum.getDesc(row.getAuditStage()));
+            vo.setAuditorId(row.getAuditorId());
+            vo.setAuditorName(row.getAuditorId() == null ? null : nicknames.get(row.getAuditorId()));
+            vo.setResult(row.getResult());
+            vo.setResultDesc(AuditResultEnum.getDesc(row.getResult()));
+            vo.setOpinion(row.getOpinion());
+            vo.setAuditTime(row.getAuditTime());
+            vo.setArticleVersion(row.getArticleVersion());
+            list.add(vo);
+        }
+        return list;
+    }
+
+    /**
+     * 最近一次驳回意见：从正序流水里<b>从后往前</b>找第一条 {@code result = 2} 的意见。
+     *
+     * <p>⚠️ 不是"最后一条流水的意见" —— 终审通过之后最后一条是"同意发布"，
+     * 拿它当驳回意见展示就错了。
+     * <p>⚠️ 也不判断"这条驳回是否已被后续提交覆盖"：前端只在
+     * {@code status = REJECTED} 时展示 {@code rejectReason}，
+     * 而已驳回状态下最后一条驳回意见必然就是当前要改的原因。
+     * 多写一层判断只会多一个出错的地方。
+     */
+    private String lastRejectOpinion(List<ArticleAuditLogVO> logs) {
+        for (int i = logs.size() - 1; i >= 0; i--) {
+            if (AuditResultEnum.isReject(logs.get(i).getResult())) {
+                return logs.get(i).getOpinion();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 实体 → VO 的公共字段搬运（详情 VO 与将来的列表 VO 共用）。
+     *
+     * <p>{@code statusDesc} / {@code statusColor} 由枚举填：
+     * 库里若有 0~9 之外的脏值，{@code ofNullable} 返回 null，
+     * 这里给"未知状态" + {@code info} 兜底，<b>不让一条脏数据把整个详情 500</b>。
+     * <p>⚠️ 与 {@code CmsArticleVO} 的关系：详情 VO 继承它，
+     * 所以这里参数收的是父类型，两个 VO 都能用。
+     */
+    private void copyBaseFields(CmsArticle src, CmsArticleVO target) {
+        ArticleStatus status = ArticleStatus.ofNullable(src.getStatus());
+        target.setId(src.getId());
+        target.setTitle(src.getTitle());
+        target.setSummary(src.getSummary());
+        target.setCoverUrl(src.getCoverUrl());
+        target.setCategoryId(src.getCategoryId());
+        target.setStatus(src.getStatus());
+        target.setStatusDesc(status == null ? "未知状态" : status.getDescription());
+        target.setStatusColor(status == null ? "info" : status.getColor());
+        target.setAuthorId(src.getAuthorId());
+        target.setPublisherId(src.getPublisherId());
+        target.setPublishTime(src.getPublishTime());
+        target.setScheduleTime(src.getScheduleTime());
+        target.setIsTop(src.getIsTop());
+        target.setViewCount(src.getViewCount());
+        target.setCreateTime(src.getCreateTime());
+        target.setUpdateTime(src.getUpdateTime());
     }
 
     // ==================== 私有工具 ====================

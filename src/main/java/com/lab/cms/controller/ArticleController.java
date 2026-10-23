@@ -9,8 +9,11 @@ import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.BatchSubmitDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.service.ArticleService;
+import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
+import com.lab.cms.vo.CmsArticleDetailVO;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -19,6 +22,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.validation.Valid;
+import java.util.List;
 
 /**
  * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个）。
@@ -182,5 +186,43 @@ public class ArticleController extends BaseController {
                               @RequestBody @Valid ArticleAuditDTO dto) {
         articleService.audit(id, dto, requireCurrentUserId());
         return Result.<Void>success("审核完成", null);
+    }
+
+    /**
+     * 文章详情（含正文、作者名、分类名、审核流水、最近驳回意见）。
+     *
+     * <p>{@code GET /api/v1/articles/{id}}，权限 {@code article:view}。
+     *
+     * <p>⚠️ 本接口<b>不加 {@code @OperLog}</b>：查询类接口不记操作日志。
+     * 理由是 {@code sys_oper_log} 是"谁改了数据"的追责表，
+     * 把每次详情查询都记进去会让它迅速膨胀到无法使用（列表页一点就是几十条）。
+     * 这也与项目里其他查询接口的处理一致。
+     *
+     * <p>⚠️ {@code id} 不存在时返回 <b>11001</b>（业务码，HTTP 保持 200），
+     * 而不是 404。理由见 {@code ErrorCode} 的说明：本项目约定
+     * 10xxx 段业务码走"HTTP 200 + body 里带码"，前端拦截器统一读 {@code code}。
+     */
+    @GetMapping("/{id}")
+    @RequirePermission("article:view")
+    public Result<CmsArticleDetailVO> getDetail(@PathVariable("id") Long id) {
+        return Result.success(articleService.getDetail(id));
+    }
+
+    /**
+     * 审核流水查询（给审核工作台单独刷新用）。
+     *
+     * <p>{@code GET /api/v1/articles/{id}/audit-logs}，权限 {@code article:view}。
+     *
+     * <p>为什么不复用详情接口：审核人点一次"通过"后只需要刷新流水，
+     * 没必要把整篇正文（LONGTEXT）再拉一遍。见
+     * {@code ArticleService#listAuditLogs} 的说明。
+     *
+     * <p>返回按 {@code auditTime} <b>正序</b>的列表；界面上的"最新在上"
+     * 由 {@code AuditTimeline.vue} 自己排序实现。
+     */
+    @GetMapping("/{id}/audit-logs")
+    @RequirePermission("article:view")
+    public Result<List<ArticleAuditLogVO>> listAuditLogs(@PathVariable("id") Long id) {
+        return Result.success(articleService.listAuditLogs(id));
     }
 }
