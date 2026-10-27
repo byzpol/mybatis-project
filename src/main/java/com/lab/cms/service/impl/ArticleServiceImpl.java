@@ -11,6 +11,7 @@ import com.lab.cms.common.enums.AuditStageEnum;
 import com.lab.cms.common.exception.BusinessException;
 import com.lab.cms.common.exception.ErrorCode;
 import com.lab.cms.dto.ArticleAuditDTO;
+import com.lab.cms.dto.CmsArticlePublishDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.entity.CmsArticleAuditLog;
@@ -38,6 +39,7 @@ import org.springframework.util.StringUtils;
 import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -141,6 +143,53 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
 
     /** 快照的修改说明：提交审核。 */
     private static final String REMARK_SUBMIT = "提交初审";
+
+    /**
+     * 排期时间与"当前时间"之间至少要留出的分钟数（S13）。
+     *
+     * <p>取 1 与定时任务的扫描频率（每分钟一次）对齐：
+     * 若允许排到"几秒后"，用户点完"排期"立即去列表页看，
+     * 很可能看到文章还停在"定时待发"，从而怀疑功能没生效。
+     * 留满一分钟，保证"排期成功 → 到点发布"这个承诺一定是可兑现的。
+     */
+    private static final int MIN_SCHEDULE_AHEAD_MINUTES = 1;
+
+    /**
+     * 定时任务单次扫描最多处理多少篇（S13）。
+     *
+     * <p>这是"封顶"而不是"分页"：正常情况下每分钟到点的文章只有个位数，
+     * 这个数永远不会被触及；它的作用是防止异常积压（比如定时任务停了三天后重启）
+     * 让某一次扫描长时间占用调度线程。超出的部分下一分钟会继续扫到。
+     */
+    private static final int SCAN_BATCH_LIMIT = 200;
+
+    /**
+     * 系统用户 ID 哨兵值（0）。
+     *
+     * <p>语义与 {@code AuditMetaObjectHandler#SYSTEM_USER_ID} 完全一致
+     * （那里用于填 {@code create_by / update_by}）：<b>0 = 由系统写入，不是人</b>。
+     * {@code sys_user} 的 id 从 1 开始，所以 0 不会与任何真实账号冲突。
+     *
+     * <p>本类用它是因为"排期到点自动发布"没有人类操作者，
+     * 而 {@code publisher_id} 是 NOT NULL 之外的可空列、必须有个说法。
+     * 详见 {@link #publishScheduled(Long)} 的注释（含"为什么不记原作者"的取舍）。
+     */
+    private static final Long SYSTEM_USER_ID = 0L;
+
+    /**
+     * 排期时间的展示格式（S13）。
+     *
+     * <p>⚠️ 必须与 {@code JacksonConfig#DATE_TIME_PATTERN}（{@code yyyy-MM-dd HH:mm:ss}）
+     * 保持一致 <b>一个字符都不差</b>。原因是实测发现的：
+     * 直接把 {@code LocalDateTime} 交给 {@code %s} 会走 {@code LocalDateTime.toString()}，
+     * 输出成 ISO 的 {@code 2026-10-27T18:30}（带 T、秒被吞掉），
+     * 于是一条错误提示里出现两种时间写法 —— 用户在界面上看到的是"传入 2020-01-01T00:00"，
+     * 而同一个接口的其它地方又全是空格格式。排查的人会以为这是两个不同的字段。
+     *
+     * <p>{@code DateTimeFormatter} 是不可变且线程安全的，可以安全地做成静态常量。
+     */
+    private static final DateTimeFormatter DISPLAY_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     /**
      * 版本快照 Mapper。
@@ -623,6 +672,292 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
             }
         }
         return toAuditLogVOs(rows, selectNicknames(auditorIds));
+    }
+
+    // ==================== 七、发布与排期发布（S13） ====================
+
+    /**
+     * 立即发布：{@code APPROVED / WITHDRAWN → PUBLISHED}。
+     *
+     * <h3>为什么这里<b>没有</b> {@code checkOwnership}</h3>
+     * <p>这是本方法与 {@code updateDraft / submitForAudit} 的<b>有意差别</b>，
+     * 不是漏写。发布是主编的职能：{@code article:publish} 只授予
+     * {@code ROLE_CHIEF(12)} 与 {@code ROLE_ADMIN(20)}，
+     * 而 {@code article:update} 连 {@code ROLE_AUTHOR(7)} 都有。
+     * <p>若在这里加归属校验，主编就永远发布不了作者提交的稿 ——
+     * 整个"作者写稿 → 编辑初审 → 主编终审 → 发布"链路会断在最后一步，
+     * 而这最后一步恰恰是主编干的。
+     *
+     * <h3>四件事的顺序（每一步都有理由）</h3>
+     * <ol>
+     *   <li>查文章（不存在 → 11001）</li>
+     *   <li>校验操作人非空（定时任务等无 HTTP 上下文的入口可能传 null）</li>
+     *   <li>状态机判可否发布（{@code DRAFT} → 11002；已归档 → 11011）</li>
+     *   <li>带乐观锁地更新"状态 + 发布人 + 发布时间 + 清空排期时间"</li>
+     * </ol>
+     * <p>⚠️ 注意第 3 步排在第 2 步之后：{@code transfer()} 在 status 为 null 时抛 11001，
+     * 若先跑状态机、再校验操作人，会出现"操作人为 null 但报的是文章不存在"的错位提示。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void publishNow(Long id, Long operatorId) {
+        CmsArticle article = requireArticle(id);
+        requireOperator(operatorId);
+
+        // 原状态在 setStatus 之前取出，只用于日志（否则会打成"已发布 → 已发布"）
+        ArticleStatus fromStatus = ArticleStatus.ofNullable(article.getStatus());
+
+        // 状态推进只走状态机（唯一入口）。PUBLISH_NOW 的合法起点是 APPROVED(3) 与
+        // WITHDRAWN(7)，其余一律 11002（终态 ARCHIVED → 11011）。
+        // 顺带说明一个易被误认为"能发布"的状态：OFFLINE(8) 只有 ARCHIVE 一条出边，
+        // 用 PUBLISH_NOW 打它会得到 11002 —— 这是状态机的既定行为，不是 bug
+        // （手册 F06「已下架 → 重新发布」的说法与状态机冲突，已登记）。
+        ArticleStatus target = ArticleStateMachine.transfer(article.getStatus(), ArticleAction.PUBLISH_NOW);
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // ⚠️ 与 updateDraft 同理，这里不能用 updateById：
+        //    ① schedule_time 要写 NULL，而 updateById 的 NOT_NULL 策略会把 null 跳过
+        //       → "清空排期时间"这个要求会静默失效（返 200 但库里没清）。
+        //    ② 显式列列还能让"这次更新动了哪些列"一眼可见。
+        // 乐观锁：carrier 里带着查出来的 version，插件会追加
+        //    SET version = version + 1 ... AND version = 旧值
+        //    → 并发第二个请求更新 0 行 → 11010。
+        LambdaUpdateWrapper<CmsArticle> wrapper = Wrappers.<CmsArticle>lambdaUpdate()
+                .eq(CmsArticle::getId, article.getId())
+                .set(CmsArticle::getStatus, target.getCode())
+                .set(CmsArticle::getPublisherId, operatorId)
+                .set(CmsArticle::getPublishTime, now)
+                // 立即发布 = 把"将来要发"的约定作废，必须清掉排期时间（见接口注释）
+                .set(CmsArticle::getScheduleTime, null);
+
+        if (baseMapper.update(optimisticLockCarrier(article), wrapper) == 0) {
+            // 文章在上面的 selectById 里刚查到过，所以 0 行只可能是 version 被别人改过
+            // （典型场景：两个主编同时点发布，或自己双击）
+            throw new BusinessException(ErrorCode.ARTICLE_UPDATE_CONFLICT);
+        }
+
+        // 不写审核流水（原因见接口注释）：发布不是审核动作，
+        // 枚举判据是 ArticleAction#isAuditAction()。
+        // 操作留痕由 Controller 上的 @OperLog 落到 sys_oper_log。
+        String statusPath = (fromStatus == null ? "未知状态" : fromStatus.name()) + " → " + target.name();
+        log.info("立即发布成功 | articleId={} | 发布人={} | 发布时间={} | {}",
+                id, operatorId, now.format(DISPLAY_TIME_FORMATTER), statusPath);
+    }
+
+    /**
+     * 排期发布：{@code APPROVED → SCHEDULED}。
+     *
+     * <h3>⚠️ "必须晚于当前时间至少 1 分钟"用的是<b>同一个 now</b></h3>
+     * <p>方法进来先取一次 {@code now}，判断与写库都用它。
+     * 若判断时取一次、写库时再取一次，两次之间哪怕差几毫秒，
+     * 边界上也会出现"校验时还没到、写库时已经到了"的抖动，
+     * 表现为<b>偶发</b>的、极难复现的边界失败。
+     * <p>为什么要求"至少 1 分钟"而不是"大于当前时间"：
+     * 定时任务每分钟扫一次，若允许"排到 3 秒后"，用户会看到"排期成功"但
+     * 这篇文章可能要到下一分钟才被扫到，或干脆因为扫描刚好错过而看起来"没生效"。
+     * 留 1 分钟余量让"排期成功 → 到点发布"这个预期一定是可兑现的。
+     *
+     * <h3>为什么把 publish_time / publisher_id 显式写回 NULL</h3>
+     * <p>排期只是"约定将来发"，此刻文章<b>还没发布</b>。
+     * 这两个列在库表上都可空，语义分别是"实际发布时间"与"发布人"，
+     * 在 {@code SCHEDULED} 状态下填着旧值就是脏数据（列表页会显示"排期待发 + 发布时间=昨天"）。
+     * <p>⚠️ 这两个 NULL 同样只能靠显式 {@code set} 写进去（同 {@code publishNow}）。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void publishSchedule(Long id, CmsArticlePublishDTO dto, Long operatorId) {
+        CmsArticle article = requireArticle(id);
+        requireOperator(operatorId);
+
+        // DTO 上的 @NotNull 是第一道；Service 被非 HTTP 入口调用时可能绕过它，这里补第二道。
+        // 错误码用 PARAM_ERROR 而不是 11007：11007 的语义是"排期时间非法"，
+        // 而"根本没传"属于请求不完整，两者给用户的下一步动作不同。
+        if (dto == null || dto.getScheduleTime() == null) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "排期时间不能为空");
+        }
+
+        ArticleStatus fromStatus = ArticleStatus.ofNullable(article.getStatus());
+        // PUBLISH_SCHEDULE 的唯一合法起点是 APPROVED(3)：
+        // 直接对 DRAFT / PENDING_* / PUBLISHED 排期 → 11002。
+        ArticleStatus target = ArticleStateMachine.transfer(article.getStatus(), ArticleAction.PUBLISH_SCHEDULE);
+
+        // 时间基准只取一次，校验与写库共用（见方法注释）
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime scheduleTime = dto.getScheduleTime();
+        if (scheduleTime.isBefore(now.plusMinutes(MIN_SCHEDULE_AHEAD_MINUTES))) {
+            throw new BusinessException(ErrorCode.ARTICLE_SCHEDULE_TIME_INVALID,
+                    String.format("排期时间必须晚于当前时间至少 %d 分钟（当前时间 %s，传入 %s）",
+                            MIN_SCHEDULE_AHEAD_MINUTES,
+                            now.format(DISPLAY_TIME_FORMATTER),
+                            scheduleTime.format(DISPLAY_TIME_FORMATTER)));
+        }
+
+        LambdaUpdateWrapper<CmsArticle> wrapper = Wrappers.<CmsArticle>lambdaUpdate()
+                .eq(CmsArticle::getId, article.getId())
+                .set(CmsArticle::getStatus, target.getCode())
+                .set(CmsArticle::getScheduleTime, scheduleTime)
+                // 尚未发布 → 两个"发布痕迹"列显式清空（见方法注释）
+                .set(CmsArticle::getPublishTime, null)
+                .set(CmsArticle::getPublisherId, null);
+
+        if (baseMapper.update(optimisticLockCarrier(article), wrapper) == 0) {
+            throw new BusinessException(ErrorCode.ARTICLE_UPDATE_CONFLICT);
+        }
+
+        String statusPath = (fromStatus == null ? "未知状态" : fromStatus.name()) + " → " + target.name();
+        log.info("排期发布成功 | articleId={} | 排期人={} | 排期时间={} | {}",
+                id, operatorId, scheduleTime.format(DISPLAY_TIME_FORMATTER), statusPath);
+    }
+
+    /**
+     * 查出"已到点该发布"的文章 ID（定时任务的扫描入口）。
+     *
+     * <h3>查询条件与索引的对应关系（这条是"用上索引"的判据）</h3>
+     * <pre>
+     *   WHERE status = ? AND schedule_time &lt;= ? ORDER BY schedule_time, id
+     *   索引  idx_status_schedule_time (status, schedule_time)
+     * </pre>
+     * <p>等值列 {@code status} 在前、范围列 {@code schedule_time} 在后，
+     * 与索引的列顺序完全一致，这正是复合索引"能走到范围扫描"的形态
+     * （反过来写 {@code (schedule_time, status)} 就只能用到范围列，等值列退化为回表过滤）。
+     * <p>⚠️ 判断标准不是"代码看起来对"，而是 {@code EXPLAIN} 的 {@code key} 列
+     * 是否等于 {@code idx_status_schedule_time}。真机验证时以执行计划为准。
+     * <p>{@code LIMIT} 是<b>常量</b>（不做字符串拼接用户输入），
+     * 作用是把一次扫描的工作量封顶，防止异常积压把单次扫描拖死。
+     * <p>⚠️ {@code deleted = 0} 由 {@code @TableLogic} 自动追加 ——
+     * 因为这是 MP 生成的 {@code selectList}，不是手写 XML
+     * （手写 XML 才需要自己写这个条件，项目里已记过这条坑）。
+     */
+    @Override
+    public List<Long> findDueScheduledArticleIds(LocalDateTime deadline) {
+        if (deadline == null) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "扫描时刻不能为空");
+        }
+        List<CmsArticle> rows = baseMapper.selectList(
+                Wrappers.<CmsArticle>lambdaQuery()
+                        .select(CmsArticle::getId)
+                        .eq(CmsArticle::getStatus, ArticleStatus.SCHEDULED.getCode())
+                        .le(CmsArticle::getScheduleTime, deadline)
+                        .orderByAsc(CmsArticle::getScheduleTime)
+                        .orderByAsc(CmsArticle::getId)
+                        .last("LIMIT " + SCAN_BATCH_LIMIT));
+
+        List<Long> ids = new ArrayList<>(rows.size());
+        for (CmsArticle row : rows) {
+            ids.add(row.getId());
+        }
+        return ids;
+    }
+
+    /**
+     * 定时任务发起的单篇发布：{@code SCHEDULED → PUBLISHED}。
+     *
+     * <h3>与 {@code publishNow} 的三点不同（都是刻意的）</h3>
+     * <ol>
+     *   <li><b>没有 operatorId 入参</b>。定时任务没有 HTTP 请求、没有登录用户，
+     *       硬造一个 {@code operatorId} 传进来只会让"谁发布的"更假。
+     *       审计归属由 {@code AuditMetaObjectHandler} 处理 ——
+     *       无 HTTP 上下文时 {@code update_by / create_by} 自动记
+     *       {@code SYSTEM_USER_ID(0)}，语义就是"系统操作"，这条口径早就在主干里定好了。</li>
+     *   <li><b>不抛业务异常，返回 boolean</b>。原因见接口注释：
+     *       扫描每分钟一次、天然幂等，"状态已经变了/文章被删了"这类情况用异常表达
+     *       会把错误日志淹掉。</li>
+     *   <li><b>自己先做一次廉价的状态预检</b>，再走状态机。
+     *       {@code transfer} 对"不在 SCHEDULED"会抛 11002，而这里期望的是"安静跳过"
+     *       —— 所以在调用前先用 if 判断，避免用 try/catch 干正常流程的事
+     *       （用异常做控制流会掩盖真正的异常）。</li>
+     * </ol>
+     *
+     * <h3>⚠️ publisher_id 记的是 {@code SYSTEM_USER_ID(0)}，为什么不是原作者</h3>
+     * <p>手册要求"记为系统用户或原提交人，并说明选了哪个"。
+     * 这里选<b>系统用户 0</b>，理由是<b>事实准确性</b>：
+     * 真正执行"发布"这个动作的不是人，是定时任务；
+     * 把它记成作者等于说"这篇是作者发布的"，而作者可能只是当初投了稿。
+     * <p>选 0 还带来口径统一：主干里 {@code 0 = 系统操作} 这层语义
+     * 已经由 {@code AuditMetaObjectHandler#SYSTEM_USER_ID} 定义，
+     * 定时任务写入时 {@code update_by} 本来就会是 0，
+     * 两个字段指向同一个结论，排查时不出现"审计说是系统、业务字段说是张三"的矛盾。
+     * <p>补充两点影响面（避免有人以为 0 会炸）：
+     * ① 详情接口的 {@code sys_user} 批查集合只含 {@code 作者 ∪ 审核人}，
+     * 不含 {@code publisher_id}，所以不会出现"0 查不到昵称"的问题；
+     * ② 前端 {@code ArticleDetail.vue} 显示的 {@code publisherName} 目前恒为
+     * {@code '-'}（VO 里没这个字段），本改动不会让页面变得更难看。
+     * <p>若组内更看重"列表页要显示发布人=作者"，改动只有一行
+     * （把下面的 {@code SYSTEM_USER_ID} 换成 {@code article.getAuthorId()}），
+     * 但请连同"事实准确性"的取舍一起在文档里登记。
+     *
+     * <h3>事务边界</h3>
+     * <p>本方法带 {@code @Transactional}，一次调用一个事务。
+     * 但<b>它必须是"经代理调用"才会生效</b>：
+     * {@code ArticlePublishScheduler} 注入的是 {@code ArticleService} 接口的代理，
+     * 所以事务生效；若将来有人在同类内部直接 {@code this.publishScheduled(id)}，
+     * 事务会静默失效（项目里已踩过 {@code @Transactional} 自调用这个坑）。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public boolean publishScheduled(Long id) {
+        // ① 预检：文章还在吗（可能刚被删 / 被逻辑删除）
+        CmsArticle article = baseMapper.selectById(id);
+        if (article == null) {
+            log.warn("定时发布跳过：文章不存在或已被删除 | articleId={}", id);
+            return false;
+        }
+
+        // ② 预检：状态还是 SCHEDULED 吗（可能刚被人工改掉）
+        //
+        // ⚠️ 这里刻意用"枚举比较"而不是 `statusCode != ArticleStatus.SCHEDULED.getCode()`：
+        //    getStatus() 与 getCode() 返回的都是**包装类型 Integer**，
+        //    两个 Integer 用 != 比的是**引用**而不是值。
+        //    它在当前代码下"恰好"是对的（-128~127 有 Integer 缓存，6 会被复用同一个实例），
+        //    这正是最危险的地方 —— 一旦状态码取值超出缓存范围（将来加更多状态），
+        //    比较就会静默变成"永远不相等"，任务从此不再发布。
+        //    用 ofNullable 转成枚举比较，既避免装箱陷阱，也顺手处理了 status 为 null 的脏数据。
+        ArticleStatus current = ArticleStatus.ofNullable(article.getStatus());
+        if (current != ArticleStatus.SCHEDULED) {
+            log.warn("定时发布跳过：当前状态不是定时待发 | articleId={} | status={}",
+                    id, article.getStatus());
+            return false;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // ③ 预检：到点了吗（可能刚被人工把排期时间改到将来）
+        if (article.getScheduleTime() == null || article.getScheduleTime().isAfter(now)) {
+            log.warn("定时发布跳过：未到排期时间 | articleId={} | scheduleTime={} | now={}",
+                    id, article.getScheduleTime().format(DISPLAY_TIME_FORMATTER),
+                    now.format(DISPLAY_TIME_FORMATTER));
+            return false;
+        }
+
+        // ④ 状态推进走状态机（SCHEDULED 唯一的一条出边）
+        ArticleStatus target = ArticleStateMachine.transfer(article.getStatus(),
+                ArticleAction.PUBLISH_SCHEDULED_TRIGGER);
+
+        LambdaUpdateWrapper<CmsArticle> wrapper = Wrappers.<CmsArticle>lambdaUpdate()
+                .eq(CmsArticle::getId, article.getId())
+                .set(CmsArticle::getStatus, target.getCode())
+                .set(CmsArticle::getPublisherId, SYSTEM_USER_ID)
+                // ✅ publish_time 是"实际发布时间" → 填 now，不是排期时间。
+                //    两者通常差几秒（扫描是每分钟一次），排期时间代表"约定"，
+                //    这个列代表"事实"，所以取 now。
+                //    核查项里"publishTime 是实际发布时间"考的就是这一点：
+                //    若误填 article.getScheduleTime()，与约定时间永远相等，看着"很对"但语义是错的。
+                .set(CmsArticle::getPublishTime, now)
+                // 发布完成后排期时间使命结束，清空（与 publishNow 同一理由）
+                .set(CmsArticle::getScheduleTime, null);
+
+        if (baseMapper.update(optimisticLockCarrier(article), wrapper) == 0) {
+            // 被人工并发改过。不抛异常：文章仍是 SCHEDULED 且已到点，
+            // 下一分钟的扫描会重新处理它；抛异常只会刷一屏错误日志。
+            log.warn("定时发布跳过：乐观锁冲突（文章刚被他人修改）| articleId={}", id);
+            return false;
+        }
+
+        log.info("排期到点自动发布成功 | articleId={} | 排期时间={} | 实际发布时间={} | SCHEDULED → {}",
+                id, article.getScheduleTime().format(DISPLAY_TIME_FORMATTER),
+                now.format(DISPLAY_TIME_FORMATTER), target.name());
+        return true;
     }
 
     /**

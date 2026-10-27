@@ -2,12 +2,14 @@ package com.lab.cms.service;
 
 import com.lab.cms.base.BaseService;
 import com.lab.cms.dto.ArticleAuditDTO;
+import com.lab.cms.dto.CmsArticlePublishDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
 import com.lab.cms.vo.CmsArticleDetailVO;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -271,4 +273,152 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * @return 按 {@code auditTime} 正序的流水；没有记录时返空列表（不是 null）
      */
     List<ArticleAuditLogVO> listAuditLogs(Long id);
+
+    // ==================== 七、发布与排期发布（S13） ====================
+
+    /**
+     * 立即发布：{@code APPROVED / WITHDRAWN → PUBLISHED}。
+     *
+     * <h3>为什么<b>不</b>校验归属（与 {@link #updateDraft} 正好相反）</h3>
+     * <p>发布这件事在业务上就<b>不该</b>由作者独占：
+     * 作者写完、编辑初审、主编终审通过之后，是主编决定"什么时候放出去"。
+     * 库表口径也印证了这一点 —— {@code article:publish} 只授予
+     * {@code ROLE_CHIEF} 与 {@code ROLE_ADMIN}，而 {@code article:update}
+     * 是连 {@code ROLE_AUTHOR} 都有的。
+     * <p>也就是说"能不能发布"是<b>功能权限</b>（在 {@code @RequirePermission} 与
+     * {@code sys_role_permission} 那一层表达），"这篇文章归谁"是<b>数据归属</b>。
+     * 若在这里加 {@code checkOwnership}，主编就永远无法发布作者提交的稿，
+     * 整个审核发布链路会断在最后一步。<b>S12 的接口分类表已把这条写死</b>
+     * （见 {@code docs/接口分类与鉴权表.md}：发布=仅主编+管理员，不校验归属）。
+     * <p>⚠️ 与它形成对照的是"撤回"：撤回是作者把自己交出去的东西收回来，
+     * 所以 S14 的 {@code withdraw} <b>要</b>校验归属。两者不能互相套用。
+     *
+     * <h3>⚠️ 立即发布必须清空 {@code scheduleTime}</h3>
+     * <p>一篇稿子完全可以先排期（{@code SCHEDULED}），随后主编改主意要立刻发。
+     * 但 {@code SCHEDULED} 只有"定时触发"一条出边，走不到 {@code PUBLISHED}。
+     * 实际路径是：排期 → <b>还没到点之前先撤回</b>？也走不通
+     * （{@code SCHEDULED} 出边只有定时触发，撤回要从 {@code PUBLISHED} 出发）。
+     * 也就是说"排期后想立刻发"在当前状态机下<b>没有合法路径</b>。
+     * 这条不是本方法的责任，但正因如此，{@code scheduleTime} 一旦残留就会变成
+     * <b>脏数据</b>：文章已 {@code PUBLISHED}，而 {@code schedule_time} 还写着未来的时间，
+     * 定时任务未来扫到它时状态条件不匹配（只扫 {@code SCHEDULED}）倒不会误发，
+     * 但列表页/报表会显示"已发布 + 排期时间=明天"这种自相矛盾的数据。
+     * <p>所以本方法<b>无条件把 {@code schedule_time} 写回 NULL</b>。
+     * ⚠️ 这件事只能靠"显式列列的 {@code LambdaUpdateWrapper.set}"做到 ——
+     * {@code updateById} 的 NOT_NULL 策略会把 null 整段跳过，写不进去。
+     *
+     * <h3>不写审核流水</h3>
+     * <p>因为发布<b>不是审核动作</b>。库表 {@code cms_article_audit_log} 的语义是
+     * "谁在哪一环节对内容给出了什么结论"，列有 {@code audit_stage}（1 初审 / 2 终审）
+     * 与 {@code result}（1 通过 / 2 驳回），
+     * "发布"填不进这两列的任何合法取值（{@code audit_stage} 是 NOT NULL）。
+     * <p>枚举上也留了判据：{@link com.lab.cms.common.enums.ArticleAction#isAuditAction()}
+     * 只认 {@code AUDIT_PASS / AUDIT_REJECT}，发布动作返回 false。
+     * 操作的留痕走另一条线：{@code @OperLog} → {@code sys_oper_log}
+     * （记"谁在什么时候点了发布"），而不是审核流水表。
+     *
+     * <h3>并发安全：乐观锁</h3>
+     * <p>两个主编同时点"立即发布"，第二个会因 {@code version} 不匹配
+     * 更新 0 行 → 抛 {@code ARTICLE_UPDATE_CONFLICT(11010)}。
+     * 结果必然是"只有一个人发布成功"，且 {@code publish_time} 只有一次写入、
+     * 不会留下两条发布记录（本方法压根不写流水表，更不存在第二条记录）。
+     *
+     * @param id         文章 ID
+     * @param operatorId 发布人（主编/管理员），由 Controller 从登录态取出
+     */
+    void publishNow(Long id, Long operatorId);
+
+    /**
+     * 排期发布：{@code APPROVED → SCHEDULED}。
+     *
+     * <h3>为什么入参是 DTO 而不是裸的 {@code LocalDateTime}</h3>
+     * <p>手册给的签名是 {@code publishSchedule(Long id, LocalDateTime scheduleTime, Long operatorId)}。
+     * 实现改成 {@link CmsArticlePublishDTO}，三个理由：
+     * <ol>
+     *   <li><b>时间格式统一由 Jackson 处理</b>。{@code LocalDateTime} 直接做
+     *       {@code @RequestBody} 参数时，解析失败会抛 {@code HttpMessageNotReadableException}，
+     *       走全局异常处理器变成 400；包一层 DTO 后能在字段上写校验注解与中文提示。</li>
+     *   <li><b>与已有接口同构</b>。{@code audit} 用的是 {@code ArticleAuditDTO}，
+     *       本方法用 DTO 后"写接口的入参一律是 DTO"这条规律不出现例外。</li>
+     *   <li><b>将来加字段不用改签名</b>。常见的下一个需求是"到点前是否发提醒"
+     *       或"排期备注"，加在 DTO 上是<b>加字段</b>，加在方法签名上是<b>改签名</b> ——
+     *       而主干契约要求"只许加方法、不许改签名"。</li>
+     * </ol>
+     *
+     * <h3>⚠️ "必须晚于当前时间"这条校验为什么<b>不</b>放在 DTO 上</h3>
+     * <p>直觉写法是给 {@code scheduleTime} 挂 {@code @Future}。
+     * 本项目不这么做，有两条实测层面的理由：
+     * <ul>
+     *   <li><b>错误码不对</b>。{@code @Future} 校验失败会被 {@code @Valid} 汇总成
+     *       {@code MethodArgumentNotValidException} → 全局处理器返回 <b>400 + 通用校验码</b>，
+     *       而这条业务规则在 {@code ErrorCode} 里有专属码
+     *       {@code ARTICLE_SCHEDULE_TIME_INVALID(11007)}。
+     *       前端要靠码来定位问题，用法校注解会把 11007 弄丢。</li>
+     *   <li><b>校验时点不对</b>。{@code @Future} 在参数绑定阶段就执行了，
+     *       比 Service 打开事务早得多。本项目在 Service 内用<b>同一个 {@code now}</b>
+     *       做判断与写入，时间基准只有一处；分散到两处会出现
+     *       "校验时还没到、写库时已经到了"的边界抖动。</li>
+     * </ul>
+     * <p>所以 DTO 上只留 {@code @NotNull}（挡"根本没传"），
+     * "要晚于当前时间至少 1 分钟"由本方法判断并抛 11007。
+     *
+     * <p>⚠️ 排期时 {@code publish_time} 与 {@code publisher_id} 会被显式写回 NULL：
+     * 文章此刻<b>还没发布</b>，这两个列保留上一轮的旧值就是脏数据。
+     *
+     * @param id         文章 ID
+     * @param dto        排期入参（{@code scheduleTime} 必填，且须晚于当前时间至少 1 分钟）
+     * @param operatorId 排期人（主编/管理员）
+     */
+    void publishSchedule(Long id, CmsArticlePublishDTO dto, Long operatorId);
+
+    /**
+     * 查出"已到点该发布"的文章 ID 列表（供定时任务扫描）。
+     *
+     * <h3>为什么单独开这个方法，而不是让定时任务直接拿 Mapper 去查</h3>
+     * <p>定时任务属于"入口"，按项目分层约定，入口只能调 Service，不能直接碰 Mapper
+     * —— 否则"到底用哪个条件筛选排期文章"会出现第二处定义，
+     * 将来改筛选口径（比如加"排除已归档"）就会漏改一处。
+     *
+     * <h3>⚠️ 这个查询必须走索引，不能全表扫</h3>
+     * <p>条件固定是 {@code status = ? AND schedule_time <= ?}，
+     * 而 {@code cms_article} 上恰好有复合索引
+     * {@code idx_status_schedule_time(status, schedule_time)}（S04 建表时就留好了），
+     * 两列的顺序与该索引的列顺序<b>一致</b>，所以能用上。
+     * <p>⚠️ 判断"索引是否真的用上"不能靠看代码，要看执行计划
+     * （{@code EXPLAIN} 或真机日志里 {@code Preparing:} 出来的 SQL）。
+     * <p>{@code ORDER BY schedule_time, id} 只是为了"先到点的先发"，
+     * 排序方向与索引一致，不会引入额外排序。
+     * <p>末尾的 {@code LIMIT} 是<b>常量</b>（不是拼接用户输入），
+     * 作用是防止某次异常情况下"积压了几万条排期文章"把一次扫描拖死；
+     * 剩下的下一分钟自然会扫到。
+     *
+     * @param deadline 判定时刻（一般传"当前时间"；显式传参是为了可测试）
+     * @return 到点的文章 ID 列表（按排期时间正序）；无到点文章返空列表（不是 null）
+     */
+    List<Long> findDueScheduledArticleIds(LocalDateTime deadline);
+
+    /**
+     * 由定时任务发起的单篇发布：{@code SCHEDULED → PUBLISHED}。
+     *
+     * <h3>⚠️ 为什么这个方法是 public 的、而且必须由外部 Bean 调用</h3>
+     * <p>因为它需要 {@code @Transactional} 且<b>每篇独立</b>：
+     * 一篇失败不能影响同批次的其他篇。而 Spring 的 {@code @Transactional}
+     * 靠 AOP 代理实现，<b>同类内部自调用不经过代理</b>（静默失效，项目里已记过这个坑）。
+     * 定时任务是一个独立的 {@code @Component}，它注入的是
+     * {@code ArticleService} 接口的代理对象，调用本方法时会正常进入代理 → 事务生效。
+     * <p>所以事务边界就落在本方法上：<b>一次调用 = 一个事务 = 一篇文章</b>。
+     * 同一批次里第 2 篇抛异常并回滚，第 1 篇已经提交的不会跟着回滚。
+     *
+     * <h3>为什么返回 boolean 而不是抛异常</h3>
+     * <p>扫描是<b>幂等</b>的、每分钟一次。绝大多数"没发成"都不是故障，而是
+     * "查出来之后状态已经变了"/"排期时间被改到未来了"/"文章被删了"这类正常情况，
+     * 用异常表达会让错误日志被噪声淹没。
+     * <p>因此本方法对上述情况统一 {@code return false} + WARN 日志
+     * （下一分钟会重新扫，或在状态条件上已经天然排除），
+     * 只有真正的意外（数据库连不上之类）才会抛出去。
+     *
+     * @param id 文章 ID
+     * @return {@code true} = 本次已发布；{@code false} = 本次未发布（原因见 WARN 日志）
+     */
+    boolean publishScheduled(Long id);
 }

@@ -7,6 +7,7 @@ import com.lab.cms.common.enums.OperType;
 import com.lab.cms.common.result.Result;
 import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.BatchSubmitDTO;
+import com.lab.cms.dto.CmsArticlePublishDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.service.ArticleService;
 import com.lab.cms.vo.ArticleAuditLogVO;
@@ -25,7 +26,8 @@ import javax.validation.Valid;
 import java.util.List;
 
 /**
- * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个）。
+ * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个，
+ * S11 追加"详情/流水"两个，S13 追加"立即发布/排期发布"两个）。
  *
  * <h3>本类只做四件事</h3>
  * <p>收参 → 交给 {@code @Valid} 校验 → 调 Service → 封装 {@code Result}。
@@ -224,5 +226,79 @@ public class ArticleController extends BaseController {
     @RequirePermission("article:view")
     public Result<List<ArticleAuditLogVO>> listAuditLogs(@PathVariable("id") Long id) {
         return Result.success(articleService.listAuditLogs(id));
+    }
+
+    /**
+     * 立即发布：{@code APPROVED / WITHDRAWN → PUBLISHED}（S13）。
+     *
+     * <p>{@code POST /api/v1/articles/{id}/publish}，权限 {@code article:publish}
+     * （库表里只授予 {@code ROLE_CHIEF} 与 {@code ROLE_ADMIN}）。
+     *
+     * <p>幂等性：<b>否</b>。第二次调用会因"当前状态已是已发布"被状态机拒（11002）。
+     * 这与"提交/审核"的处理一致 —— 明确报错比静默成功好，
+     * 用户至少知道第一次已经生效了。
+     *
+     * <h3>为什么 {@code @OperLog} 的 type 用 {@code PUBLISH} 而不是手册说的 {@code UPDATE}</h3>
+     * <p>手册 S13 的提示词里写的是 {@code type = UPDATE}。本项目改用
+     * {@code OperType.PUBLISH("发布")} —— 枚举里<b>本来就为发布留了这个取值</b>，
+     * 它存在的意义就是把"发布"这类动作从"修改"里分出来。
+     * <p>实际影响：{@code sys_oper_log.oper_type} 存的是枚举名
+     * （{@code WebLogAspect} 写的是 {@code annotation.type().name()}），
+     * 用 {@code UPDATE} 的话"发布一篇文章"与"改一次草稿"在库里是同一个值，
+     * 按 {@code oper_type} 筛选日志时区分不开；
+     * 用 {@code PUBLISH} 则可以直接 {@code WHERE oper_type = 'PUBLISH'} 查发布记录。
+     * <p>结论：项目口径是"<b>代码里有更贴切的枚举取值就用它</b>"，手册的 {@code UPDATE} 是就近选的默认值。
+     *
+     * <p>⚠️ 参数保持默认记录（不写 {@code saveParams = false}）：
+     * 本接口<b>没有请求体</b>，被记录下来的只有路径变量 id，
+     * 而"谁在什么时候发布了哪一篇"恰恰是最需要留档的信息。
+     *
+     * <h3>发布<b>不</b>校验归属（与修改草稿不同）</h3>
+     * <p>发布在业务上就是主编的职能，主编要能发布作者提交的稿。
+     * 详见 {@code ArticleService#publishNow} 的注释与
+     * {@code docs/接口分类与鉴权表.md} 的接口分类表。
+     */
+    @PostMapping("/{id}/publish")
+    @RequirePermission("article:publish")
+    @OperLog(module = "文章管理", type = OperType.PUBLISH, desc = "发布文章")
+    public Result<Void> publishNow(@PathVariable("id") Long id) {
+        articleService.publishNow(id, requireCurrentUserId());
+        return Result.<Void>success("文章已发布", null);
+    }
+
+    /**
+     * 排期发布：{@code APPROVED → SCHEDULED}（S13）。
+     *
+     * <p>{@code POST /api/v1/articles/{id}/schedule}，权限 {@code article:publish}
+     * （与立即发布同一个权限码：它们都是"主编决定什么时候让文章上线"，
+     * 差别只在时间，没有理由要求不同的角色）。
+     *
+     * <p>请求体：{@code {"scheduleTime": "2026-10-27 18:30:00"}}。
+     * ⚠️ 时间格式是 <b>{@code yyyy-MM-dd HH:mm:ss}（空格分隔）</b>，<b>不是</b> ISO-8601 的
+     * {@code 2026-10-27T18:30:00}。这是 {@code JacksonConfig} 给 {@code LocalDateTime}
+     * 全局注册的唯一格式（自定义的 {@code LocalDateTimeDeserializer}），传 {@code T} 分隔的
+     * 字符串会直接返回 400「请求体格式不正确」—— 真机联调时第一版脚本就是这么写错的
+     * （见 {@code docs/S13-发布与排期实测记录.md}）。
+     * <p>⚠️ 手册 S13 写的是"排期时间传 ISO 8601"，与本项目实际配置不符，以代码为准。
+     * <p>不要在某个接口单独做格式兼容（比如再注册一个能接受 {@code T} 的解析器），
+     * 否则项目里会出现两套时间口径 —— 前端 {@code ArticleEdit.vue} 的日期选择器
+     * 已经统一提交这种格式。
+     *
+     * <p>幂等性：<b>否</b>。第二次调用会因"当前状态是定时发布中"被状态机拒（11002）
+     * —— 想改排期时间，当前状态机下没有"直接改"的路径（{@code SCHEDULED} 只有定时触发一条出边），
+     * 这是状态机的既定行为，已登记在 {@code docs/状态机图.md} 的待议项里。
+     *
+     * <p>⚠️ 排期时间必须<b>晚于当前时间至少 1 分钟</b>，否则返回
+     * {@code ARTICLE_SCHEDULE_TIME_INVALID(11007)}。
+     * 这条校验在 Service 里做（不在 DTO 上用 {@code @Future}），
+     * 理由见 {@code ArticleService#publishSchedule} 的注释。
+     */
+    @PostMapping("/{id}/schedule")
+    @RequirePermission("article:publish")
+    @OperLog(module = "文章管理", type = OperType.PUBLISH, desc = "排期发布")
+    public Result<Void> publishSchedule(@PathVariable("id") Long id,
+                                        @RequestBody @Valid CmsArticlePublishDTO dto) {
+        articleService.publishSchedule(id, dto, requireCurrentUserId());
+        return Result.<Void>success("排期设置成功", null);
     }
 }

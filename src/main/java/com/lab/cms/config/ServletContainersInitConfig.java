@@ -18,6 +18,7 @@ import javax.servlet.Filter;
  *   │  根容器（ContextLoaderListener）          │
  *   │  SpringConfig：Service / Mapper / 事务   │
  *   │                 AOP 切面 / 数据源         │
+ *   │  SchedulingConfig：定时任务开关（S13）     │
  *   └────────────────┬────────────────────────┘
  *                    │ parent
  *   ┌────────────────▼────────────────────────┐
@@ -41,11 +42,20 @@ public class ServletContainersInitConfig extends AbstractAnnotationConfigDispatc
 
     /**
      * 根容器配置类。
-     * <p>只放"非 Web 层"的配置：{@link SpringConfig}
+     * <p>只放"非 Web 层"的配置：{@link SpringConfig}（业务/数据/事务/切面）
+     * 与 {@link SchedulingConfig}（定时任务开关，S13）。
+     *
+     * <h3>⚠️ 为什么 {@code SchedulingConfig} 要写在这里，而不是让 {@code SpringConfig} 扫描到</h3>
+     * <p>本方法<b>只有真实 Web 容器（Tomcat）启动时才会被执行</b>，
+     * 而单元测试是通过 {@code @ContextConfiguration(classes = SpringConfig.class)}
+     * 直接建根容器的 —— 不会经过本类。
+     * <p>把"开启定时调度"放在这里，就得到了一条清晰的分界：
+     * <b>生产环境开启调度，测试环境不开启</b>，于是测试不会在后台改数据库。
+     * 详细原因见 {@link SchedulingConfig} 的类注释。
      */
     @Override
     protected Class<?>[] getRootConfigClasses() {
-        return new Class[]{SpringConfig.class};
+        return new Class[]{SpringConfig.class, SchedulingConfig.class};
     }
 
     /**

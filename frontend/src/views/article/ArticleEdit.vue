@@ -122,7 +122,7 @@
               v-model="form.scheduleTime"
               type="datetime"
               placeholder="不填表示不排期"
-              value-format="YYYY-MM-DDTHH:mm:ss"
+              value-format="YYYY-MM-DD HH:mm:ss"
               class="full-width"
             />
             <p class="field-hint">
@@ -273,10 +273,15 @@ async function fetchDetail() {
     form.content = detail?.content ?? ''
     form.categoryId = detail?.categoryId ?? null
     form.isTop = Number(detail?.isTop) === 1 ? 1 : 0
-    // 后端给的是 LocalDateTime（序列化成 "2026-10-25T09:00:00"），
-    // 而 el-date-picker 配了 value-format="YYYY-MM-DDTHH:mm:ss"，格式必须是这一个 ——
-    // 直接把 "2026-10-25 09:00:00"（带空格）塞回去，picker 会解析不出来、显示成空
-    form.scheduleTime = detail?.scheduleTime ? String(detail.scheduleTime).replace(' ', 'T').slice(0, 19) : ''
+    // ⚠️ 时间格式：后端 JacksonConfig 把 LocalDateTime 全局序列化成
+    //    "2026-10-25 09:00:00"（**空格分隔**），而 el-date-picker 的 value-format
+    //    也必须是同一个格式，两边才能对齐。
+    //    S13 修过一个真实缺陷：这里原本把空格替换成 T（用 ISO-8601 的写法），
+    //    而 picker 的 value-format 也是 "YYYY-MM-DDTHH:mm:ss"，
+    //    于是"保存带排期时间的草稿"和列表页的"排期发布"都会被后端判成
+    //    HTTP 400「请求体格式不正确」—— 前端能填、能点，但请求根本进不到业务逻辑。
+    //    详见 docs/S13-发布与排期实测记录.md 的"跨模块缺陷"一节。
+    form.scheduleTime = detail?.scheduleTime ? String(detail.scheduleTime).slice(0, 19) : ''
   } catch (e) {
     // 拦截器已提示过一次；这里只负责别把用户留在一张空表单上
     ElMessage.warning('没能读到这篇的原文，已返回列表（避免空表单覆盖原内容）')

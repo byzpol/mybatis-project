@@ -181,11 +181,14 @@
         v-model="scheduleTime"
         type="datetime"
         placeholder="选择发布时间"
-        value-format="YYYY-MM-DDTHH:mm:ss"
+        value-format="YYYY-MM-DD HH:mm:ss"
         :disabled-date="disablePastDate"
         style="width: 100%"
       />
-      <p class="schedule-hint">时间必须晚于当前时间，否则后端返回 11007（排期时间非法）。</p>
+      <p class="schedule-hint">
+        时间必须晚于当前时间<b>至少 1 分钟</b>（后端每分钟扫描一次排期任务），
+        否则返回 11007（排期时间非法）。到点后由后台定时任务自动转为「已发布」。
+      </p>
       <template #footer>
         <el-button @click="scheduleVisible = false">取消</el-button>
         <el-button type="primary" :loading="acting" :disabled="!scheduleTime" @click="onScheduleConfirm">

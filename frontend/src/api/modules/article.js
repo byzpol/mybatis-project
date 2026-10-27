@@ -181,8 +181,13 @@ export function publishNow(id) {
  * 排期发布
  * POST /api/v1/articles/{id}/schedule  权限 article:publish  记日志
  * @param {number} id 文章 id
- * @param {string} scheduleTime 计划发布时间，ISO 8601 字符串（如 '2026-10-25T09:00:00'）
- *        后端校验必须晚于当前时间，否则抛 ARTICLE_SCHEDULE_TIME_INVALID(11007)
+ * @param {string} scheduleTime 计划发布时间，格式 "yyyy-MM-dd HH:mm:ss"
+ *        （如 '2026-10-25 09:00:00'）
+ *        ⚠️ 必须是**空格分隔**，不是 ISO-8601 的 'T' 分隔 ——
+ *        JacksonConfig 给 LocalDateTime 全局注册的反序列化器只认这一种格式，
+ *        传 '2026-10-25T09:00:00' 会被判 400「请求体格式不正确」。
+ *        后端还会校验必须晚于当前时间至少 1 分钟，
+ *        否则抛 ARTICLE_SCHEDULE_TIME_INVALID(11007)
  * 前置状态：审核通过(3)；迁移到 定时发布中(6)，到点由后端定时任务转 已发布(5)
  */
 export function publishSchedule(id, scheduleTime) {
