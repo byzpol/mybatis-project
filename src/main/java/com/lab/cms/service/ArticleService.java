@@ -421,4 +421,145 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * @return {@code true} = 本次已发布；{@code false} = 本次未发布（原因见 WARN 日志）
      */
     boolean publishScheduled(Long id);
+
+    // ==================== 八、撤回 / 下架 / 归档（S14） ====================
+
+    /**
+     * 撤回：{@code PUBLISHED → WITHDRAWN}。
+     *
+     * <h3>三个"把文章拿下来"的动作到底差在哪</h3>
+     * <table border="1">
+     *   <tr><th></th><th>撤回 withdraw</th><th>下架 offline</th><th>归档 archive</th></tr>
+     *   <tr><td>谁来做</td><td><b>作者本人</b>（{@code article:withdraw}，{@code ROLE_AUTHOR} 就有）</td>
+     *       <td>主编 / 管理员（{@code article:manage}）</td>
+     *       <td>主编 / 管理员（{@code article:manage}）</td></tr>
+     *   <tr><td>源状态</td><td>仅 {@code PUBLISHED}</td><td>仅 {@code PUBLISHED}</td>
+     *       <td>{@code WITHDRAWN} 或 {@code OFFLINE}</td></tr>
+     *   <tr><td>目标状态</td><td>{@code WITHDRAWN}</td><td>{@code OFFLINE}</td>
+     *       <td>{@code ARCHIVED}（终态）</td></tr>
+     *   <tr><td>能否恢复</td><td><b>能</b>（{@code WITHDRAWN + PUBLISH_NOW → PUBLISHED}）</td>
+     *       <td><b>不能</b>（{@code OFFLINE} 只有 {@code ARCHIVE} 一条出边）</td>
+     *       <td><b>不能</b>（终态，无任何出边）</td></tr>
+     *   <tr><td>要不要归属校验</td><td><b>要</b>（只能收回自己的稿）</td>
+     *       <td>不要（运营动作，与"这篇归谁"无关）</td>
+     *       <td>不要（同左）</td></tr>
+     *   <tr><td>要不要填原因</td><td>不要</td><td><b>要</b>（下架必须说明理由）</td><td>不要</td></tr>
+     * </table>
+     * <p>语义上的区别一句话说清：<b>撤回是"我先拿回来改改"（可逆），
+     * 下架是"这篇有问题，别让人看了"（不可逆但仍留在库里），
+     * 归档是"这篇的生命周期结束了"（终态，从此只读）</b>。
+     * <p>前台可见性：三者都<b>不出现在读者端列表</b>里。差别在"能不能回来"——
+     * 撤回的文章作者改完可以重新发布，下架/归档的不能。
+     *
+     * <h3>⚠️ 为什么撤回要校验归属，而下架/归档不校验</h3>
+     * <p>这是 S12 的接口分类表已经写死的口径（{@code docs/接口分类与鉴权表.md}）：
+     * <ul>
+     *   <li><b>撤回是"作者收回自己交出去的东西"</b>。它的权限码
+     *       {@code article:withdraw} 连 {@code ROLE_AUTHOR(7)} 都有，
+     *       如果再不校验归属，任何作者都能把别人的已发布文章撤下来 ——
+     *       这是一个真实的破坏性漏洞（已发布文章被莫名下线的责任事故）。
+     *       校验命中抛 {@code ARTICLE_NOT_OWNER(11003)}。</li>
+     *   <li><b>下架/归档是运营职能</b>，权限码 {@code article:manage} 只授予
+     *       {@code ROLE_CHIEF(12)} 与 {@code ROLE_ADMIN(20)}。
+     *       主编要能下架任何一篇已发布文章（包括别人写的）——
+     *       这就是这个职能存在的意义。加归属校验等于让审核者只能管自己的稿，职能失效。</li>
+     * </ul>
+     * <p>⚠️ 注意这与"发布不校验归属"（见 {@link #publishNow}）是同一个道理，
+     * 但结论与"修改草稿"（{@link #updateDraft} 要校验）相反 ——
+     * <b>判据是"这个动作是作者对自己的内容负责，还是运营对全站内容负责"</b>，
+     * 不是"所有写操作都校验"或"都不校验"。
+     *
+     * <h3>不写审核流水</h3>
+     * <p>同 {@link #publishNow}：{@code cms_article_audit_log} 的 {@code result} 只有
+     * 1 通过 / 2 驳回 两个合法取值，"撤回"填不进这两列；
+     * 而且该表还有一个更硬的副作用 —— 详情接口的 {@code rejectReason} 是
+     * "从后往前找第一条 {@code result = 2} 的意见"，
+     * 一旦往下架/撤回流水里塞 {@code result=2}，用户会在文章详情页上看到
+     * "驳回原因：内容涉及侵权"这种张冠李戴的提示。
+     * <p>留痕走 {@code @OperLog} → {@code sys_oper_log}（记"谁在什么时候撤回了哪一篇"）。
+     *
+     * @param id         文章 ID
+     * @param operatorId 操作人 ID（必须是文章作者本人）
+     */
+    void withdraw(Long id, Long operatorId);
+
+    /**
+     * 下架：{@code PUBLISHED → OFFLINE}。<b>不可逆</b>（{@code OFFLINE} 只有 {@code ARCHIVE} 一条出边）。
+     *
+     * <h3>⚠️ 为什么不收 DTO 而收裸的 {@code String reason}（与 {@link #publishSchedule} 相反）</h3>
+     * <p>{@code publishSchedule} 收 DTO 的理由是"把 {@code LocalDateTime} 的解析交给字段上的
+     * 校验注解、并让时间格式只有一处定义"，那是<b>技术理由</b>。
+     * 这里的原因字段就是一个非空字符串，Service 层没有任何格式需要处理，
+     * 包一层 DTO 只是多一个类。DTO（{@link com.lab.cms.dto.CmsArticleOfflineDTO}）
+     * 只出现在 Controller 的 {@code @RequestBody} 上 —— <b>HTTP 边界需要它，Service 边界不需要</b>。
+     * <p>⚠️ 但"非空"这件事<b>不能只靠 Controller 的 {@code @Valid}</b>：
+     * Service 可能被非 HTTP 入口调用（批处理、别的 Service），
+     * 那时 {@code @Valid} 根本不会执行。所以本方法内部会再判一次（抛 400 + 中文提示）。
+     *
+     * <h3>⚠️ 下架原因写到哪：选 {@code sys_oper_log.request_param}，不用审核流水表</h3>
+     * <p>手册给了两个候选（复用 {@code cms_article_audit_log} 加一个新 {@code auditStage}、
+     * 或新增一张"状态变更记录表"），本项目<b>两个都不选</b>，理由分别是：
+     * <ol>
+     *   <li><b>不能复用审核流水表。</b>{@code audit_stage} 的列注释写死"1=初审 2=终审"，
+     *       {@code result} 是 NOT NULL 且只允许 1/2。要给下架找位置，
+     *       就得塞一个非法语义的 {@code result}（选 1 表示"通过下架"？选 2？）——
+     *       而 {@code result=2} 会污染详情接口的 {@code rejectReason}（见 {@link #withdraw} 的说明），
+     *       选 1 则会让审核时间线上出现一条"主编终审·通过"的假记录。
+     *       另有前端成本：{@code AuditTimeline.vue} 按 {@code auditStage} 渲染，
+     *       stage=3 在它那里显示成"未知环节"。</li>
+     *   <li><b>不新增表/列。</b>17 张表是四人共用的冻结资产，加表要全组同步
+     *       （实体、Mapper、init.sql、成员B/C/D 的文档）；
+     *       而 {@code cms_article} 加一列 {@code offline_reason} 同样动的是公共表。
+     *       为一句运营备注付这个代价不成比例 —— 这与 S13 拒绝手册要求的
+     *       "为乐观锁加 ALTER"是同一条判据：<b>能不加 DDL 就不加</b>。</li>
+     * </ol>
+     * <p>结论：<b>原因的持久化通道就是 {@code @OperLog}</b>。
+     * {@code WebLogAspect} 会把方法入参用 Jackson 序列化成 JSON 写进
+     * {@code sys_oper_log.request_param}（默认 {@code saveParams = true}），
+     * 于是这一条日志天然包含 {@code [文章id, "下架原因", 操作人id]}。
+     * {@code sys_oper_log} 本来就是"谁在什么时候做了什么"的追责表，
+     * 而"下架"恰恰是一个操作（不是审核结论）—— 语义完全对得上。
+     * <p>⚠️ 如果组内后来确实要"在文章详情里回显下架原因"，最小改动是给
+     * {@code cms_article} 加一列；本步<b>刻意不做</b>，只把结论登记在
+     * {@code docs/S14-撤回下架归档实测记录.md} 的"挂起待定"一节。
+     *
+     * @param id         文章 ID
+     * @param operatorId 操作人 ID（主编 / 管理员）
+     * @param reason     下架原因（非空，最长 200 字）
+     */
+    void offline(Long id, Long operatorId, String reason);
+
+    /**
+     * 归档：{@code WITHDRAWN / OFFLINE → ARCHIVED}。<b>终态</b>，之后任何动作都非法。
+     *
+     * <h3>⚠️ "已归档真的是终态"这件事由两层共同保证</h3>
+     * <ol>
+     *   <li><b>状态机层</b>：{@code TRANSITIONS} 里没有任何以 {@code ARCHIVED} 为源状态的行，
+     *       且 {@code transfer()} 对终态<b>单独</b>抛
+     *       {@code ARTICLE_ARCHIVED_READONLY(11011)}（比"状态不允许操作"提示更明确）。</li>
+     *   <li><b>业务入口层（本步新增的"双保险"）</b>：三个方法共用的私有流转方法开头显式判一次
+     *       {@code status == ARCHIVED} → 11011。</li>
+     * </ol>
+     * <p>第 2 层在逻辑上<b>是冗余的</b>（第 1 层已经能拦住），项目仍然加上它，因为：
+     * <ul>
+     *   <li>"终态只读"是这个领域最容易被后人无意破坏的一条不变式 ——
+     *       将来有人想加"从归档恢复"，改的会是状态机表，那时这条显式判断
+     *       会立刻在他的测试里失败，起到"喊一声"的作用。</li>
+     *   <li>它把"归档不可再操作"这个业务结论写在<b>业务代码</b>里，
+     *       而不是只藏在状态机的数据表里。读 {@code archive()} 的人不用跳三层文件。</li>
+     * </ul>
+     * <p>⚠️ 手册 S14 说这条抛 {@code ARTICLE_ARCHIVED}（11010）。本项目<b>没有</b>这个码名，
+     * 11010 是 {@code ARTICLE_UPDATE_CONFLICT}（乐观锁冲突）；
+     * 归档只读的码是 {@code ARTICLE_ARCHIVED_READONLY(11011)}。属手册错误码错位区，以代码为准。
+     *
+     * <h3>⚠️ 归档要不要顺带让检索索引失效</h3>
+     * <p>要，但<b>本步不实现</b>：{@code cms_article_index} 由成员D 维护，
+     * 本步只在实现里留一个带 {@code TODO} 的调用点 + 日志（见
+     * {@code ArticleServiceImpl#markSearchIndexInvalidOnArchive}）。
+     * 这是刻意的边界纪律 —— 直接改别人负责的表，出问题时要跨模块排查。
+     *
+     * @param id         文章 ID
+     * @param operatorId 操作人 ID（主编 / 管理员）
+     */
+    void archive(Long id, Long operatorId);
 }

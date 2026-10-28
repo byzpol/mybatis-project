@@ -142,7 +142,9 @@
                 :title="confirmTitle(act, row)"
                 :content="confirmContent(act, row)"
                 :confirm-text="act.label"
-                @confirm="runAction(act.key, row)"
+                :require-reason="act.key === 'offline'"
+                :reason-hint="act.key === 'offline' ? REASON_HINT_OFFLINE : undefined"
+                @confirm="(reason) => runAction(act.key, row, reason)"
               >
                 <el-button link type="danger" size="small">{{ act.label }}</el-button>
               </ConfirmAction>
@@ -401,8 +403,14 @@ function goCreate() {
  * 动作分发。
  * 之所以用一张 switch 而不是在模板里写 @click="只要该动作的逻辑"，
  * 是因为操作列的按钮是 v-for 出来的 —— 每个按钮不可能各自绑一个函数。
+ *
+ * @param {string} key 动作 key（见 articleActions.js 的 ACTION_META）
+ * @param {object} row 文章行
+ * @param {string} [reason] 二次确认里填写的原因。
+ *        只有 `requireReason` 模式的 ConfirmAction 会把它 emit 出来（当前只有「下架」），
+ *        其余动作这个参数是 undefined —— 所以下面的 case 用不到就别接。
  */
-function runAction(key, row) {
+function runAction(key, row, reason) {
   switch (key) {
     case 'view':
       router.push({ name: 'ArticleDetail', params: { id: row.id } })
@@ -440,7 +448,7 @@ function runAction(key, row) {
       doDelete(row)
       break
     case 'offline':
-      doOffline(row)
+      doOffline(row, reason)
       break
     case 'archive':
       doArchive(row)
@@ -531,11 +539,20 @@ async function doDelete(row) {
   }
 }
 
-/** 下架：已发布(5) → 已下架(8)。⚠️ 下架后状态机里**没有**出边回到已发布，只能归档 */
-async function doOffline(row) {
+/**
+ * 下架：已发布(5) → 已下架(8)。
+ * ⚠️ 下架后状态机里**没有**出边回到已发布，只能归档。
+ *
+ * ⚠️ S14 起 reason 是**后端必填**（`@NotBlank`，不填返 400），所以这里必须传。
+ *    原因由 ConfirmAction 的 `require-reason` 模式收集（填了才允许点确认），
+ *    这条交互是 F05 就把 ConfirmAction 做成两种形态时就预留好的。
+ *    后端把原因写进 `sys_oper_log.request_param`（不写审核流水表），
+ *    追溯方式：`SELECT * FROM sys_oper_log WHERE oper_desc='下架文章' AND oper_id=<文章id>`。
+ */
+async function doOffline(row, reason) {
   acting.value = true
   try {
-    await offline(row.id)
+    await offline(row.id, reason)
     ElMessage.success('已下架')
     tableRef.value?.refresh()
   } catch (e) {
@@ -595,6 +612,18 @@ async function onScheduleConfirm() {
 
 // ---------------- 二次确认的文案 ----------------
 // 写成一个函数而不是在模板里拼字符串：模板里拼容易漏判空（row 可能还没加载完）
+
+/**
+ * 「下架」确认框里，原因输入框下方的说明。
+ *
+ * ⚠️ 这里刻意**不**沿用 ConfirmAction 的默认文案「原因会记录到审核流水/操作日志里」：
+ *    下架原因**不会**进 `cms_article_audit_log`（那张表的 `result` 只有 1 通过/2 驳回，
+ *    且详情页的 `rejectReason` 取"最近一条 result=2 的意见"，
+ *    下架原因若混进去，用户会在文章详情里看到一句张冠李戴的"驳回原因"）。
+ *    它的实际去处是 `@OperLog` → `sys_oper_log.request_param`。
+ *    前端文案必须说实情，否则用户会以为能在审核时间线里找到这条原因。
+ */
+const REASON_HINT_OFFLINE = '原因会记入操作日志（sys_oper_log），供事后追溯'
 
 function confirmTitle(act) {
   const map = {

@@ -960,6 +960,161 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         return true;
     }
 
+    // ==================== 八、撤回 / 下架 / 归档（S14） ====================
+
+    /**
+     * 撤回：{@code PUBLISHED → WITHDRAWN}。
+     *
+     * <p>本方法与下架、归档共用 {@link #changeStatusByAction}，只有两个参数不同：
+     * 动作是 {@code WITHDRAW}，且<b>要</b>校验归属（第四参传 {@code true}）。
+     * 为什么要校验归属、以及它与下架/归档的差别，见
+     * {@link ArticleService#withdraw} 的对比表。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void withdraw(Long id, Long operatorId) {
+        changeStatusByAction(id, operatorId, ArticleAction.WITHDRAW, true);
+    }
+
+    /**
+     * 下架：{@code PUBLISHED → OFFLINE}。
+     *
+     * <h3>⚠️ 这里的非空校验是<b>第二道</b>，不是重复劳动</h3>
+     * <p>第一道在 {@code CmsArticleOfflineDTO.reason} 的 {@code @NotBlank} 上，
+     * 只有走 HTTP 入口（{@code @Valid} 生效）时才会执行。
+     * Service 可能被别的入口调用（批处理、别的 Service、测试），
+     * 那时 {@code @Valid} 根本不在链路上 —— 所以在这里再判一次。
+     * <p>用 {@code StringUtils.hasText} 而不是 {@code !"".equals(reason)}：
+     * 后者放行 {@code "   "}（三个空格），等于允许"填了个看不见的原因"。
+     * 这与 {@link #requireSubmittable} 的判据一致。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void offline(Long id, Long operatorId, String reason) {
+        if (!StringUtils.hasText(reason)) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "下架原因不能为空");
+        }
+
+        changeStatusByAction(id, operatorId, ArticleAction.OFFLINE, false);
+
+        // 原因的主持久化通道是 @OperLog → sys_oper_log.request_param（见接口注释的取舍说明）。
+        // 这里额外打一条 WARN 级业务日志，是为了在不查库的情况下也能从
+        // <Tomcat>/bin/logs/cms-business.log 里直接 grep 到"哪篇因为什么被下了"。
+        // 用 WARN 而不是 INFO：下架是运营对外的破坏性动作，值得在日志里显眼一点。
+        log.warn("文章下架 | articleId={} | 操作人={} | 原因={}", id, operatorId, reason);
+    }
+
+    /**
+     * 归档：{@code WITHDRAWN / OFFLINE → ARCHIVED}（终态）。
+     *
+     * <p>"已归档不可再操作"的第一层保证在状态机（{@code TRANSITIONS} 没有以
+     * {@code ARCHIVED} 为源的行，且 {@code transfer} 对终态专门抛 11011），
+     * 第二层在 {@link #changeStatusByAction} 开头那句显式判断。
+     * 为什么明知冗余还要写第二层，见 {@link ArticleService#archive}。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void archive(Long id, Long operatorId) {
+        changeStatusByAction(id, operatorId, ArticleAction.ARCHIVE, false);
+
+        // 归档后要顺带让检索索引失效，但索引表由成员D 维护 → 本步只留调用点（见方法注释）
+        markSearchIndexInvalidOnArchive(id);
+    }
+
+    /**
+     * 撤回 / 下架 / 归档的<b>公共骨架</b>（三个动作只差"动作枚举"与"是否校验归属"）。
+     *
+     * <h3>⚠️ 为什么必须抽出来，而不是复制三遍</h3>
+     * <p>这五步在三个动作里完全相同：查文章 → 校验操作人 → （可能要）校验归属 →
+     * 状态机判合法 → 带乐观锁改状态。复制三遍的代价不是"多写了几十行"，
+     * 而是<b>将来加一条规则时会漏改两处</b>——比如某天要给"状态变更"加一条
+     * "文章存在未处理的举报时禁止操作"，三个入口漏掉一个就是一个后门。
+     * <p>这类"同一规则散在多处"是本项目最忌讳的形态，所以宁可多一个参数。
+     *
+     * <h3>⚠️ 参数 {@code requireOwnership} 而不是在方法里按动作 {@code if} 判断</h3>
+     * <p>写成 {@code if (action == WITHDRAW) checkOwnership(...)} 也能跑，
+     * 但那样"哪些动作要校验归属"就<b>藏在骨架里</b>，读 {@code withdraw()} 的人
+     * 看不出它跟归属校验有关。做成显式参数后，
+     * 每个公开方法自己声明"我要不要归属校验"，一眼可见（三个入口一行一个，谁是什么一目了然）。
+     *
+     * <h3>为什么不顺手清空 {@code publish_time} / {@code publisher_id}</h3>
+     * <p>撤回/下架都发生在"已经发布过"的文章上，那两个列记的是一次<b>已经发生的事实</b>
+     * （"这篇文章在 X 时刻被 Y 发布过"）。把它们清掉等于篡改历史，
+     * 事后追责时看不到"它曾经上线过"。这与 S13 里"立即发布必须清空 {@code schedule_time}"
+     * 的情形不同 —— 后者清的是<b>对未来的约定</b>（约定作废了就该清），
+     * 前者是<b>对过去的记录</b>（发生过就留着）。
+     *
+     * <h3>状态码为 null 的脏数据</h3>
+     * <p>不做单独处理，让它走 {@code transfer} → 抛 {@code ARTICLE_NOT_FOUND(11001)}，
+     * 与 {@link #publishNow} / {@link #publishSchedule} 的处理一致。
+     * （真正想表达的是"状态异常"，但三处改口径要一起改，不在本步范围内。）
+     *
+     * @param id               文章 ID
+     * @param operatorId       操作人 ID
+     * @param action           动作（WITHDRAW / OFFLINE / ARCHIVE）
+     * @param requireOwnership 是否要求"操作人必须是作者"（撤回 true；下架/归档 false）
+     */
+    private void changeStatusByAction(Long id, Long operatorId, ArticleAction action,
+                                      boolean requireOwnership) {
+        CmsArticle article = requireArticle(id);
+        requireOperator(operatorId);
+
+        if (requireOwnership) {
+            checkOwnership(article, operatorId);
+        }
+
+        // 原状态在 update 之前取出，只用于日志（否则会打成"已归档 → 已归档"）
+        ArticleStatus fromStatus = ArticleStatus.ofNullable(article.getStatus());
+
+        // ★ 第二层"终态只读"保险（第一层在状态机里，见方法注释）。
+        //   ⚠️ 手册这里写的是抛 ARTICLE_ARCHIVED(11010)，本项目没有这个码名：
+        //   11010 是 ARTICLE_UPDATE_CONFLICT（乐观锁冲突），归档只读是 11011。
+        //   属手册错误码错位区，以 ErrorCode 为准。
+        if (fromStatus == ArticleStatus.ARCHIVED) {
+            log.warn("归档文章被再次操作，已拦截 | articleId={} | 动作={} | 操作人={}",
+                    id, action.name(), operatorId);
+            throw new BusinessException(ErrorCode.ARTICLE_ARCHIVED_READONLY);
+        }
+
+        // 状态推进只走状态机（唯一入口）。非法组合一律 11002，文案带当前状态与动作，
+        // 前端直接 toast 就是一句人话。
+        ArticleStatus target = ArticleStateMachine.transfer(article.getStatus(), action);
+
+        LambdaUpdateWrapper<CmsArticle> wrapper = Wrappers.<CmsArticle>lambdaUpdate()
+                .eq(CmsArticle::getId, article.getId())
+                .set(CmsArticle::getStatus, target.getCode());
+
+        if (baseMapper.update(optimisticLockCarrier(article), wrapper) == 0) {
+            // 刚 selectById 查到过，0 行只可能是 version 被并发改过（典型：同一篇文章
+            // 在两个浏览器里同时点撤回/归档，或本人双击）
+            throw new BusinessException(ErrorCode.ARTICLE_UPDATE_CONFLICT);
+        }
+
+        log.info("文章状态变更成功 | articleId={} | 操作人={} | 动作={} | {} → {}",
+                id, operatorId, action.name(),
+                fromStatus == null ? "未知状态" : fromStatus.name(), target.name());
+    }
+
+    /**
+     * 归档后的"检索索引失效"调用点。
+     *
+     * TODO(S14 → 成员D)：{@code cms_article_index} 里这篇文章的索引应当失效
+     *   （{@code index_status = 0}，或按业务约定逻辑删除该行），
+     *   否则读者端的标题检索仍可能命中一篇已经归档、本不该再暴露的文章。
+     *
+     * <p>⚠️ <b>本步只留调用点，不实现</b>：{@code cms_article_index} 由成员D 主责维护，
+     * 索引的写入/失效/重建口径都在他那边（S16 的跨域联调要接的正是这条链路）。
+     * 本模块擅自在事务里改别人的表，会带来两个问题：
+     * ① 事务边界被拉长到跨模块（成员D 若在新事务里做索引同步，本事务回滚时那部分不回滚）；
+     * ② 出问题时排查要跨两个人的代码。
+     * <p>留成"一个会打日志的空方法"而不是纯注释，是因为<b>调用点本身是有价值的</b>：
+     * 成员D 接入时只要把这里换成真正的调用即可，
+     * 不需要再去 {@code archive()} 里找"该在哪一行插"。
+     */
+    private void markSearchIndexInvalidOnArchive(Long articleId) {
+        log.info("TODO(检索索引)：文章已归档，索引失效待成员D 的同步逻辑接管 | articleId={}", articleId);
+    }
+
     /**
      * 查某篇文章的全部审核流水，<b>按 {@code audit_time} 正序</b>。
      *

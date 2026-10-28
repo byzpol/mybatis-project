@@ -197,7 +197,15 @@ export function publishSchedule(id, scheduleTime) {
 /**
  * 撤回
  * POST /api/v1/articles/{id}/withdraw  权限 article:withdraw 记日志
- * 把已发布/定时发布中的文章收回，进入 已撤回(7)
+ * 已发布(5) → 已撤回(7)，**之后可以重新发布**（`WITHDRAWN + PUBLISH_NOW → PUBLISHED`）。
+ *
+ * ⚠️ 只有**已发布(5)** 能撤回。早前这里写的是"已发布/定时发布中都能收回"，那是错的：
+ *    `SCHEDULED(6)` 在状态机里只有 `PUBLISH_SCHEDULED_TRIGGER` 一条出边，
+ *    所以"排期后想取消"当前**没有合法路径**（要支持得先给状态机加第 15 条迁移）。
+ *
+ * ⚠️ 后端**要校验归属**（S12 定的口径）：只能撤回自己创建的文章，
+ *    别人的稿返回 `ARTICLE_NOT_OWNER(11003)`。所以列表页上"撤回"按钮只对
+ *    自己的文章有意义 —— 主编看到别人已发布的文章时，该给的是「下架」而不是「撤回」。
  */
 export function withdraw(id) {
   return post(`/articles/${id}/withdraw`)
@@ -207,14 +215,25 @@ export function withdraw(id) {
  * 下架
  * POST /api/v1/articles/{id}/offline   权限 article:manage  记日志
  * 已发布(5) → 已下架(8)
+ *
+ * ⚠️ **reason 必填**（S14 起）：后端 `CmsArticleOfflineDTO.reason` 是 `@NotBlank` + ≤200，
+ *    不传或传纯空白会返回 400「请求体不合法」。
+ *    这与「撤回」不同 —— 撤回是作者收回自己的稿，不需要解释；
+ *    下架是运营动作，文章会立刻从读者端消失，必须留下"为什么"。
+ *
+ * ⚠️ 原因的**不写入审核流水表**（`cms_article_audit_log` 的 `result` 只有 1 通过/2 驳回，
+ *    混进去会污染详情页的 `rejectReason`）。它的去处是
+ *    `@OperLog` → `sys_oper_log.request_param`（后端切面把入参序列化成 JSON）。
+ *
  * ⚠️ F06 按状态机源码核实：**已下架(8) 没有出边回到已发布**
  *    （`ArticleStateMachine` 只有 `OFFLINE + ARCHIVE → ARCHIVED`，没有 `OFFLINE + PUBLISH_NOW`）。
  *    所以"下架后重新上架"在当前状态机下做不到，前端也不该给这个按钮。
- *    另：本接口**没有 reason 入参**；手册 S14 要求"下架必填原因"，
- *    若 S14 给接口补了 reason，这里同步加参数。
+ *
+ * @param {number} id 文章 id
+ * @param {string} reason 下架原因，必填，≤200 字
  */
-export function offline(id) {
-  return post(`/articles/${id}/offline`)
+export function offline(id, reason) {
+  return post(`/articles/${id}/offline`, { reason })
 }
 
 /**

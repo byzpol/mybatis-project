@@ -7,6 +7,7 @@ import com.lab.cms.common.enums.OperType;
 import com.lab.cms.common.result.Result;
 import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.BatchSubmitDTO;
+import com.lab.cms.dto.CmsArticleOfflineDTO;
 import com.lab.cms.dto.CmsArticlePublishDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.service.ArticleService;
@@ -27,7 +28,8 @@ import java.util.List;
 
 /**
  * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个，
- * S11 追加"详情/流水"两个，S13 追加"立即发布/排期发布"两个）。
+ * S11 追加"详情/流水"两个，S13 追加"立即发布/排期发布"两个，
+ * S14 追加"撤回/下架/归档"三个）。
  *
  * <h3>本类只做四件事</h3>
  * <p>收参 → 交给 {@code @Valid} 校验 → 调 Service → 封装 {@code Result}。
@@ -300,5 +302,83 @@ public class ArticleController extends BaseController {
                                         @RequestBody @Valid CmsArticlePublishDTO dto) {
         articleService.publishSchedule(id, dto, requireCurrentUserId());
         return Result.<Void>success("排期设置成功", null);
+    }
+
+    /**
+     * 撤回：{@code PUBLISHED → WITHDRAWN}（S14）。<b>可以再发布</b>。
+     *
+     * <p>{@code POST /api/v1/articles/{id}/withdraw}，权限 {@code article:withdraw}。
+     * <p>⚠️ 权限码跟随<b>库表</b>：契约 §1.3 给"撤回"写的也是 {@code article:withdraw}
+     * （这个码库里确实有，且 {@code ROLE_AUTHOR(7)} 就有）。
+     * 与之对照，契约给"下架/归档"写的 {@code article:offline} / {@code article:archive}
+     * <b>库里一个都没有</b>，所以那两个接口用 {@code article:manage}（见下）。
+     *
+     * <p>⚠️ 本接口<b>要校验归属</b>（只能撤回自己的文章），与下架/归档相反 ——
+     * 完整对比表见 {@code ArticleService#withdraw} 的 Javadoc。
+     * 归属不符时返回 {@code ARTICLE_NOT_OWNER(11003)}。
+     *
+     * <p>幂等性：<b>否</b>。第二次调用会因"当前状态是已撤回"被状态机拒（11002）——
+     * 符合本接口的既定风格（明确报错优于静默成功，用户至少知道第一次已生效）。
+     */
+    @PostMapping("/{id}/withdraw")
+    @RequirePermission("article:withdraw")
+    @OperLog(module = "文章管理", type = OperType.WITHDRAW, desc = "撤回文章")
+    public Result<Void> withdraw(@PathVariable("id") Long id) {
+        articleService.withdraw(id, requireCurrentUserId());
+        return Result.<Void>success("文章已撤回", null);
+    }
+
+    /**
+     * 下架：{@code PUBLISHED → OFFLINE}（S14）。<b>不可逆</b>，只能再归档。
+     *
+     * <p>{@code POST /api/v1/articles/{id}/offline}，权限 {@code article:manage}
+     * （库表口径：主编 / 管理员）。
+     * <p>⚠️ 契约 §1.3 给"下架"写的是 {@code article:offline}，
+     * 但 {@code sys_permission} 里<b>没有这个码</b>。按项目口径"库表 &gt; 契约"，
+     * 这里用 {@code article:manage}。若照契约写，{@code PermissionAspect}
+     * 会认为所有角色（含 admin）都缺该权限，结果是所有人都被 403 拦死。
+     * 该差异已登记在 {@code docs/接口分类与鉴权表.md}。
+     *
+     * <p>请求体：{@code {"reason": "内容涉及侵权，应版权方要求下架"}}。
+     * <p>⚠️ <b>reason 必填</b>（{@code @NotBlank} + 长度 ≤200），不填返回 400。
+     * 原因不落审核流水表，落 {@code @OperLog} → {@code sys_oper_log.request_param}
+     * （取舍理由见 {@code ArticleService#offline} 的 Javadoc）。
+     *
+     * <p>⚠️ 本接口<b>不校验归属</b>：下架是运营职能，主编要能下架任何一篇已发布文章
+     * （包括别人写的）。加归属校验会让审核者只能管自己的稿，职能失效。
+     *
+     * <p>⚠️ 参数保持默认记录（不写 {@code saveParams = false}）：
+     * 原因必须被记进日志，这正是它唯一的持久化通道。
+     */
+    @PostMapping("/{id}/offline")
+    @RequirePermission("article:manage")
+    @OperLog(module = "文章管理", type = OperType.OFFLINE, desc = "下架文章")
+    public Result<Void> offline(@PathVariable("id") Long id,
+                                @RequestBody @Valid CmsArticleOfflineDTO dto) {
+        articleService.offline(id, requireCurrentUserId(), dto.getReason());
+        return Result.<Void>success("文章已下架", null);
+    }
+
+    /**
+     * 归档：{@code WITHDRAWN / OFFLINE → ARCHIVED}（S14）。<b>终态，之后不可再操作</b>。
+     *
+     * <p>{@code POST /api/v1/articles/{id}/archive}，权限 {@code article:manage}
+     * （与下架同码，理由同上）。
+     *
+     * <p>⚠️ 对<b>已归档</b>的文章调用本接口（或调用撤回/下架），返回
+     * {@code ARTICLE_ARCHIVED_READONLY(11011)}。手册 S14 写的是 11010，
+     * 但本项目 11010 是乐观锁冲突（{@code ARTICLE_UPDATE_CONFLICT}）——
+     * 属手册错误码错位区，以 {@code ErrorCode} 为准。
+     *
+     * <p>⚠️ 本接口<b>不校验归属</b>（同下架）。
+     * <p>⚠️ 归档顺带"让检索索引失效"这件事由成员D 负责，本步只在 Service 里留了
+     * 调用点（{@code ArticleServiceImpl#markSearchIndexInvalidOnArchive}）。
+     */
+    @PostMapping("/{id}/archive")
+    @RequirePermission("article:manage")
+    @OperLog(module = "文章管理", type = OperType.ARCHIVE, desc = "归档文章")
+    public Result<Void> archive(@PathVariable("id") Long id) {
+        articleService.archive(id, requireCurrentUserId());
+        return Result.<Void>success("文章已归档", null);
     }
 }
