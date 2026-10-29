@@ -28,6 +28,7 @@ import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
 import com.lab.cms.vo.CmsArticleDetailVO;
 import com.lab.cms.vo.CmsArticleVO;
+import com.lab.cms.vo.CmsArticleVersionVO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +44,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -143,6 +145,40 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
 
     /** 快照的修改说明：提交审核。 */
     private static final String REMARK_SUBMIT = "提交初审";
+
+    /**
+     * 快照的修改说明前缀：回滚（S15）。
+     *
+     * <p>完整说明 = 前缀 + <b>目标</b>版本号，例如"回滚至版本 1"。
+     * <p>⚠️ 记的是<b>目标版本</b>而不是新产生的版本号 ——
+     * 用户关心的是"这一版是从哪儿抄回来的"，
+     * 而不是"这是第几版"（后者在版本号列里已经有了）。
+     * 若误记新版本号，文案会变成"回滚至版本 8"而实际上是回到 v1，语义完全反了。
+     */
+    private static final String REMARK_ROLLBACK_PREFIX = "回滚至版本 ";
+
+    /**
+     * 允许回滚的文章状态白名单（S15）。
+     *
+     * <p>只有这三个状态能回滚，它们的共同点是<b>"还没对读者生效"</b>：
+     * {@code DRAFT} 从没提交过、{@code REJECTED} 被驳回、{@code WITHDRAWN} 已从线上收回。
+     *
+     * <p>⚠️ 用<b>白名单</b>而不是"排除 PUBLISHED / PENDING_* / SCHEDULED"的黑名单：
+     * 将来状态机加第 11 个状态时，黑名单会<b>默认放行</b>那个新状态
+     * （写回滚的人根本不知道有新状态存在），而白名单会默认拒绝。
+     * 安全相关的判断一律用白名单，这是本项目的一条通则。
+     *
+     * <p>⚠️ 用 {@code EnumSet} + {@code Collections.unmodifiableSet}：
+     * {@code EnumSet} 的 {@code contains} 是位运算（比 {@code HashSet} 快且无哈希开销），
+     * 包一层不可变视图防止有人在别处 {@code add} 进去。
+     * <p>⚠️ {@code EnumSet.contains(null)} 返回 {@code false} 而不抛异常，
+     * 所以状态为 null 的脏数据会走到"不允许回滚"分支，不需要额外判空。
+     */
+    private static final Set<ArticleStatus> ROLLBACK_ALLOWED_STATUSES =
+            Collections.unmodifiableSet(EnumSet.of(
+                    ArticleStatus.DRAFT,
+                    ArticleStatus.REJECTED,
+                    ArticleStatus.WITHDRAWN));
 
     /**
      * 排期时间与"当前时间"之间至少要留出的分钟数（S13）。
@@ -1113,6 +1149,154 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
      */
     private void markSearchIndexInvalidOnArchive(Long articleId) {
         log.info("TODO(检索索引)：文章已归档，索引失效待成员D 的同步逻辑接管 | articleId={}", articleId);
+    }
+
+    // ==================== 九、版本快照与回滚（S15） ====================
+
+    /**
+     * 查某篇文章的全部版本快照（只读，不返回正文）。实现见
+     * {@link ArticleService#listVersions(Long)} 的规则说明。
+     *
+     * <p>本方法只发 <b>2~3 条 SQL</b>：
+     * <ol>
+     *   <li>{@code requireArticle} 的按主键查文章（1 条）；</li>
+     *   <li>版本列表本身（1 条）；</li>
+     *   <li>批量取修改人昵称（1 条，且仅当确实有人需要查时才发）。</li>
+     * </ol>
+     * <p>⚠️ <b>最大版本号刻意不额外查一次</b>：版本列表已按 {@code version_no} 升序取出，
+     * 最后一个元素的 {@code versionNo} 就是最大值。再发一条
+     * {@code SELECT MAX(version_no)} 不但多一次往返，还多一个"两条 SQL 结果不一致"的可能
+     * （两条查询之间有人插入了新版本）。用列表自身推导，"取列表"与"算 isCurrent"必然一致。
+     */
+    @Override
+    public List<CmsArticleVersionVO> listVersions(Long articleId) {
+        requireArticle(articleId);
+
+        List<CmsArticleVersion> rows = versionMapper.selectList(
+                Wrappers.<CmsArticleVersion>lambdaQuery()
+                        .eq(CmsArticleVersion::getArticleId, articleId)
+                        .orderByAsc(CmsArticleVersion::getVersionNo));
+
+        // 空列表而非 null：前端不用写 `|| []` 兜底（与 toAuditLogVOs 同口径）
+        if (rows.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        // 批量取昵称：先收集去重，再一条 IN 查询。用 LinkedHashSet 而不是 List，
+        // 避免同一修改人重复出现在 IN 列表里（同一篇文章的多个版本通常是同一个人改的）。
+        Set<Long> modifierIds = new LinkedHashSet<>();
+        for (CmsArticleVersion row : rows) {
+            if (row.getModifierId() != null) {
+                modifierIds.add(row.getModifierId());
+            }
+        }
+        Map<Long, String> nicknames = selectNicknames(modifierIds);
+
+        int maxVersionNo = rows.get(rows.size() - 1).getVersionNo();
+
+        List<CmsArticleVersionVO> list = new ArrayList<>(rows.size());
+        for (CmsArticleVersion row : rows) {
+            list.add(toVersionVO(row, maxVersionNo, nicknames));
+        }
+        return list;
+    }
+
+    /**
+     * 回滚到指定版本。规则、以及"为什么已发布不能直接回滚""为什么回滚还要新增一版"，
+     * 见 {@link ArticleService#rollbackVersion(Long, Integer, Long)}。
+     *
+     * <h3>⚠️ 校验顺序：归属 → 已归档 → 状态白名单</h3>
+     * <p>与 S14 的 {@code changeStatusByAction} 保持<b>逐字一致</b>的顺序：
+     * {@code checkOwnership} 在最前。所以用<b>非作者</b>身份回滚一篇<b>已归档</b>文章，
+     * 得到的是 {@code 11003}（不是 {@code 11011}）—— 理由见
+     * {@code docs/S14-撤回下架归档实测记录.md} §4.2：
+     * "不是你的东西"必须比"这东西现在什么状态"更早被拒，
+     * 否则作者身份是否匹配会被状态判断掩盖。
+     * <p>两个入口的顺序一致还有一个实际好处：读代码的人不用为每个动作重新推一遍
+     * "这里到底谁先谁后"，S14 定的规矩在 S15 直接沿用。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void rollbackVersion(Long articleId, Integer versionNo, Long operatorId) {
+        CmsArticle article = requireArticle(articleId);
+        requireOperator(operatorId);
+        checkOwnership(article, operatorId);
+
+        ArticleStatus fromStatus = ArticleStatus.ofNullable(article.getStatus());
+
+        // 归档只读排在白名单之前：与 S14 同序。11011 比 11002 更具体，
+        // 用户看到"已归档的文章不可修改"比"当前状态不允许该操作"更知道该怎么办。
+        if (fromStatus == ArticleStatus.ARCHIVED) {
+            log.warn("归档文章被回滚，已拦截 | articleId={} | 操作人={}", articleId, operatorId);
+            throw new BusinessException(ErrorCode.ARTICLE_ARCHIVED_READONLY);
+        }
+        if (!ROLLBACK_ALLOWED_STATUSES.contains(fromStatus)) {
+            throw new BusinessException(ErrorCode.ARTICLE_STATUS_ILLEGAL,
+                    String.format("文章当前状态为「%s」，不允许回滚（仅草稿、已驳回、已撤回可回滚）",
+                            fromStatus == null ? "未知状态" : fromStatus.getDescription()));
+        }
+
+        CmsArticleVersion target = versionMapper.selectOne(
+                Wrappers.<CmsArticleVersion>lambdaQuery()
+                        .eq(CmsArticleVersion::getArticleId, articleId)
+                        .eq(CmsArticleVersion::getVersionNo, versionNo));
+        if (target == null) {
+            throw new BusinessException(ErrorCode.ARTICLE_VERSION_NOT_FOUND);
+        }
+
+        // 覆盖标题与正文。
+        // ⚠️ 必须用 LambdaUpdateWrapper 显式列列，不能用 updateById(entity)：
+        //    content_snapshot 允许为 NULL（"确实没正文"），而 updateById 的
+        //    NOT_NULL 策略会把 null 字段整段跳过 —— 于是"回滚到一个没有正文的版本"
+        //    会返回 200，但库里的正文一个字都没被清掉。这是 S09 就踩过的同一个坑。
+        // ⚠️ 只 set 这两列：summary / cover_url / category_id / is_top 不在快照里，
+        //    不能顺手带过去（详见接口注释）。
+        LambdaUpdateWrapper<CmsArticle> wrapper = Wrappers.<CmsArticle>lambdaUpdate()
+                .eq(CmsArticle::getId, article.getId())
+                .set(CmsArticle::getTitle, target.getTitleSnapshot())
+                .set(CmsArticle::getContent, target.getContentSnapshot());
+
+        if (baseMapper.update(optimisticLockCarrier(article), wrapper) == 0) {
+            throw new BusinessException(ErrorCode.ARTICLE_UPDATE_CONFLICT);
+        }
+
+        // ⚠️ 内存中的 article 必须同步改成"回滚后"的内容，再交给 insertVersionSnapshot。
+        //    否则新快照记的是回滚<b>前</b>的旧内容 —— 而它的 modify_remark 却写着
+        //    "回滚至版本 N"，等于生产一条自相矛盾的记录，且这条记录会覆盖
+        //    "当前版本"的含义（isCurrent 指向它，内容却是旧的）。
+        article.setTitle(target.getTitleSnapshot());
+        article.setContent(target.getContentSnapshot());
+
+        // 新版本的说明记的是"目标版本"，不是新版本号（见 REMARK_ROLLBACK_PREFIX 注释）。
+        insertVersionSnapshot(article, operatorId, REMARK_ROLLBACK_PREFIX + versionNo);
+
+        log.info("版本回滚成功 | articleId={} | 操作人={} | 目标版本=v{} | 状态保持 {}",
+                articleId, operatorId, versionNo, fromStatus.name());
+    }
+
+    /**
+     * 版本快照实体 → VO。
+     *
+     * <p>⚠️ {@code isCurrent} 的比较用 {@code intValue() == int}，
+     * <b>不能</b>写 {@code row.getVersionNo() == maxVersionNo}：
+     * 两个 {@code Integer} 用 {@code ==} 比的是<b>引用</b>，
+     * 只在 -128~127 的缓存范围内"恰好"相等 —— 版本号超过 127 之后
+     * 这个判断会静默变成永远 {@code false}（一篇文章改 128 次并非不可能，
+     * 而且越到后期越难发现）。项目里已经为同一个坑踩过一次（S13 的
+     * {@code statusCode != SCHEDULED.getCode()}），这里直接写成原始类型比较。
+     */
+    private CmsArticleVersionVO toVersionVO(CmsArticleVersion row, int maxVersionNo,
+                                            Map<Long, String> nicknames) {
+        CmsArticleVersionVO vo = new CmsArticleVersionVO();
+        vo.setId(row.getId());
+        vo.setVersionNo(row.getVersionNo());
+        vo.setTitleSnapshot(row.getTitleSnapshot());
+        vo.setModifierId(row.getModifierId());
+        vo.setModifierName(row.getModifierId() == null ? null : nicknames.get(row.getModifierId()));
+        vo.setModifyRemark(row.getModifyRemark());
+        vo.setCreateTime(row.getCreateTime());
+        vo.setIsCurrent(row.getVersionNo() != null && row.getVersionNo().intValue() == maxVersionNo);
+        return vo;
     }
 
     /**

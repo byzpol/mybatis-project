@@ -8,6 +8,7 @@ import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
 import com.lab.cms.vo.CmsArticleDetailVO;
+import com.lab.cms.vo.CmsArticleVersionVO;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -562,4 +563,94 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * @param operatorId 操作人 ID（主编 / 管理员）
      */
     void archive(Long id, Long operatorId);
+
+    // ==================== 九、版本快照与回滚（S15） ====================
+
+    /**
+     * 查某篇文章的全部版本快照。<b>只读，不返回正文</b>。
+     *
+     * <h3>⚠️ 为什么这个接口<b>不</b>做归属校验</h3>
+     * <p>与 {@link #getDetail(Long)}、{@link #listAuditLogs(Long)} 同一条口径
+     * （见 {@code docs/接口分类与鉴权表.md} §二.5）：后台是协作场景，
+     * 编辑/主编必须能打开任何一篇文章才能审、才能核对，被限制的是"改"而不是"看"。
+     * 版本列表里只有标题快照与修改说明，没有任何正文，暴露面比详情接口还小 ——
+     * 详情都放开了，这里单独收紧只会自相矛盾。
+     *
+     * <p>⚠️ 但它<b>会</b>校验文章是否存在：查不到抛
+     * {@code ARTICLE_NOT_FOUND(11001)}。这与 {@code listAuditLogs} 的处理一致
+     * —— 一个不存在的文章 id 应该明确报错，而不是安静地返回空列表
+     * （前端无法区分"这文章没有版本"和"这文章根本不存在"）。
+     *
+     * <h3>排序与 {@code isCurrent}</h3>
+     * <p><b>后端按 {@code version_no} 正序返回</b>（1 → N），
+     * 由前端自己倒序展示。这样定的原因是"接口返回物理顺序、展示顺序归 UI"：
+     * 如果后端直接倒序返回，将来前端想要正序（比如画版本演进图）就得反转数组，
+     * 而反转一个"已经倒序的数组"会让代码里出现两处方向相反的排序逻辑。
+     * <p>（前端 {@code ArticleDetail.vue} 已经这么做了：拿到后
+     * {@code [...list].sort((a, b) => Number(b.versionNo) - Number(a.versionNo))}。）
+     *
+     * <p>{@code modifierName} 用<b>一次</b> {@code IN} 查询批量取（不是 N+1）；
+     * {@code isCurrent} 由"与最大版本号比较"得出，一篇文章最多一条为 {@code true}。
+     *
+     * @param articleId 文章 ID
+     * @return 版本快照列表（按 versionNo 正序）；没有快照时返回空列表
+     * @throws com.lab.cms.common.exception.BusinessException 文章不存在 → 11001
+     */
+    List<CmsArticleVersionVO> listVersions(Long articleId);
+
+    /**
+     * 回滚到指定版本：把该版本的标题与正文覆盖回文章，<b>并生成一个新版本</b>。
+     *
+     * <h3>允许回滚的状态（白名单，不是黑名单）</h3>
+     * <p>只有 {@code DRAFT(0)} / {@code REJECTED(4)} / {@code WITHDRAWN(7)}
+     * 三个状态可以回滚，其余一律 {@code ARTICLE_STATUS_ILLEGAL(11002)}；
+     * 已归档额外走 {@code ARTICLE_ARCHIVED_READONLY(11011)}。
+     *
+     * <p><b>为什么"已发布(5)"不能直接回滚</b>：已发布的内容是<b>线上</b>内容。
+     * 允许一步回滚意味着"任何有这个权限的人可以在不经过审核的情况下改变读者看到的东西"，
+     * 而那正是审核流程存在的意义。想改已发布文章的正文，正确路径是
+     * <b>先撤回 → 再回滚 → 重新提交审核 → 重新发布</b>，
+     * 每一步都在状态机里有据可查。这条约束让"回滚"永远只作用于
+     * "还没对读者生效"的稿子，风险面小得多。
+     * <p>更硬的一条理由：{@code PUBLISHED(5)} 与 {@code PENDING_*}/{@code SCHEDULED(6)}
+     * 一样属于"在流转中"的状态，而这些状态的出边都被状态机管着；
+     * 回滚不会改变状态、只改内容，它绕过了状态机 —— 越是这样，
+     * 越要靠一条显式白名单把"能让它绕过状态机的场景"限制到最小。
+     *
+     * <h3>⚠️ 回滚只恢复 {@code title} 与 {@code content}</h3>
+     * <p>因为 {@code cms_article_version} <b>只快照了这两列</b>
+     * （{@code title_snapshot} / {@code content_snapshot}）。
+     * {@code summary} / {@code cover_url} / {@code category_id} / {@code is_top}
+     * <b>不在快照里，因此回滚不会、也无法恢复它们</b>。
+     * <p>这一点必须说清楚，否则用户会以为"回滚 = 回到那一版的样子"，
+     * 而实际上分类、封面、摘要都还是现在的值。前端确认弹窗的文案已经按
+     * "以 vN 的内容新建一个版本"来表达，不敢写"恢复到 vN"。
+     *
+     * <h3>⚠️ 为什么要"再生成一个新版本"，而不是删掉后面的版本</h3>
+     * <p>回滚的语义是<b>"以旧内容新建一版"</b>，不是"撤销"。
+     * 如果删掉后面的版本，会有三个后果：
+     * <ol>
+     *   <li><b>历史不可信</b>：版本表本来是只增不改的审计性数据
+     *       （{@code CmsArticleVersion} 连 {@code update_by}/{@code update_time}
+     *       都没有，见其类注释），删除等于允许改写历史。</li>
+     *   <li><b>版本号会重复</b>：删掉 N+1 之后下一个新版本又会取到 N+1，
+     *       而"第 N+1 版"在别人眼里已经出现过一次，含义完全不同。</li>
+     *   <li><b>回滚本身会变得无法追溯</b>：谁也说不清"文章现在为什么是这个内容"。</li>
+     * </ol>
+     * <p>所以回滚 = 覆盖正文 + 追加一条 {@code version_no = max + 1}、
+     * {@code modify_remark = "回滚至版本 N"} 的快照。版本号<b>只增不减</b>。
+     *
+     * <h3>为什么这里不校验状态机</h3>
+     * <p>状态机管的是<b>状态之间的迁移</b>，而回滚<b>不改变状态</b>
+     * （{@code ArticleAction.ROLLBACK} 在 {@code TRANSITIONS} 里没有任何一条边）。
+     * 所以它走的是"状态白名单 + 归属校验"，不是 {@code transfer}。
+     *
+     * @param articleId  文章 ID
+     * @param versionNo  目标版本号（1 起）
+     * @param operatorId 操作人 ID
+     * @throws com.lab.cms.common.exception.BusinessException
+     *         文章不存在→11001；非作者→11003；状态不允许→11002；
+     *         已归档→11011；版本不存在→11009；乐观锁冲突→11010
+     */
+    void rollbackVersion(Long articleId, Integer versionNo, Long operatorId);
 }

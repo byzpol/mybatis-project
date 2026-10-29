@@ -96,9 +96,17 @@
     <div class="app-card">
       <h2 class="block-title">版本记录</h2>
       <el-table v-loading="versionsLoading" :data="versions" border stripe size="small">
-        <el-table-column prop="versionNo" label="版本号" width="90" align="center">
+        <el-table-column prop="versionNo" label="版本号" width="140" align="center">
           <template #default="{ row }">
             <span class="version-no">v{{ row.versionNo }}</span>
+            <!--
+              当前版本标记（S15）：后端 isCurrent = (versionNo == 该文章最大版本号)。
+              一篇文章最多一条为 true。加上它是因为"版本号最大"这件事
+              单看数字列表并不直观（用户不一定知道总共有几版），
+              而"我现在是哪一版"是版本页最先要回答的问题。
+              ⚠️ 注意 isCurrent 与文章状态无关：已发布/已归档的文章一样有当前版本。
+            -->
+            <el-tag v-if="row.isCurrent" type="success" effect="light" round size="small">当前</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="titleSnapshot" label="标题快照" min-width="200" show-overflow-tooltip />

@@ -9,11 +9,13 @@ import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.BatchSubmitDTO;
 import com.lab.cms.dto.CmsArticleOfflineDTO;
 import com.lab.cms.dto.CmsArticlePublishDTO;
+import com.lab.cms.dto.CmsArticleRollbackDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.service.ArticleService;
 import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
 import com.lab.cms.vo.CmsArticleDetailVO;
+import com.lab.cms.vo.CmsArticleVersionVO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,7 +31,7 @@ import java.util.List;
 /**
  * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个，
  * S11 追加"详情/流水"两个，S13 追加"立即发布/排期发布"两个，
- * S14 追加"撤回/下架/归档"三个）。
+ * S14 追加"撤回/下架/归档"三个，S15 追加"版本列表/版本回滚"两个）。
  *
  * <h3>本类只做四件事</h3>
  * <p>收参 → 交给 {@code @Valid} 校验 → 调 Service → 封装 {@code Result}。
@@ -380,5 +382,62 @@ public class ArticleController extends BaseController {
     public Result<Void> archive(@PathVariable("id") Long id) {
         articleService.archive(id, requireCurrentUserId());
         return Result.<Void>success("文章已归档", null);
+    }
+
+    /**
+     * 版本列表（S15）。{@code GET /api/v1/articles/{id}/versions}，权限 {@code article:view}。
+     *
+     * <p><b>只读接口，不加 {@code @OperLog}</b> —— 与 {@link #getDetail(Long)} /
+     * {@link #listAuditLogs(Long)} 同口径：查询不记操作日志，
+     * 否则翻几次版本列表就在 {@code sys_oper_log} 里刷一屏，
+     * 真正需要追溯的写操作反而被淹掉。
+     *
+     * <p>⚠️ {@code article:view} 而<b>不是</b>契约 §1.3 写的 {@code article:list}：
+     * 库里没有 {@code article:list} 这个权限码，照契约写会让
+     * {@code PermissionAspect} 认为所有角色都缺权限，<b>连 admin 都被 403</b>。
+     * 该差异已登记在 {@code docs/接口分类与鉴权表.md}（那张表是核对过的口径）。
+     *
+     * <p>⚠️ <b>不返回正文</b>：{@code content_snapshot} 是 LONGTEXT，
+     * 列表接口带正文会让响应体膨胀到几百 KB，而列表上并不显示它。
+     * 详见 {@code CmsArticleVersionVO} 的类注释。
+     *
+     * <p>返回按 {@code versionNo} <b>正序</b>；倒序展示由前端做。
+     */
+    @GetMapping("/{id}/versions")
+    @RequirePermission("article:view")
+    public Result<List<CmsArticleVersionVO>> listVersions(@PathVariable("id") Long id) {
+        return Result.success(articleService.listVersions(id));
+    }
+
+    /**
+     * 回滚到指定版本（S15）。{@code POST /api/v1/articles/{id}/rollback}，权限 {@code article:update}。
+     *
+     * <p>请求体：{@code {"versionNo": 1}}。
+     *
+     * <p>⚠️ <b>URL 以契约为准，不是手册的</b>：手册 S15 写
+     * {@code POST /articles/{id}/versions/{versionNo}/rollback}，
+     * 契约 {@code docs/接口契约.md} §1.3 第 16 行是 {@code POST /articles/{id}/rollback}
+     * 且版本号放请求体。三个理由（契约已冻结、前端已按契约实现、
+     * URL 层级不超过 3）见 {@code CmsArticleRollbackDTO} 的类注释。
+     *
+     * <p>⚠️ 权限码 {@code article:update}（不是契约写的 {@code article:edit}）。
+     * <p>⚠️ <b>要校验归属</b>（11003）：回滚改的是正文内容，与"改草稿"同类，
+     * 所以只有作者本人能回滚自己的稿 —— 主编若想改别人已发布的内容，
+     * 用的是"下架/归档"那条线，不是本接口。
+     * <p>⚠️ 只有 {@code DRAFT / REJECTED / WITHDRAWN} 三个状态可回滚；
+     * 已发布要先撤回。已归档 → 11011。
+     *
+     * <p>{@code @OperLog} 用 {@code module = "文章管理"}（手册写的是"文章"）：
+     * 本项目 {@code sys_oper_log.module} 统一用"文章管理"，改成本接口独一份会
+     * 让按 module 的筛选统计漏掉它。{@code type} 用 {@code UPDATE} ——
+     * {@code OperType} 里没有专门的"回滚"（也不该加，它本质就是一次内容修改）。
+     */
+    @PostMapping("/{id}/rollback")
+    @RequirePermission("article:update")
+    @OperLog(module = "文章管理", type = OperType.UPDATE, desc = "回滚文章版本")
+    public Result<Void> rollbackVersion(@PathVariable("id") Long id,
+                                        @RequestBody @Valid CmsArticleRollbackDTO dto) {
+        articleService.rollbackVersion(id, dto.getVersionNo(), requireCurrentUserId());
+        return Result.<Void>success("已回滚到指定版本", null);
     }
 }
