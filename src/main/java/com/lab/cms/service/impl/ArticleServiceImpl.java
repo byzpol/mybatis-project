@@ -1,7 +1,11 @@
 package com.lab.cms.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.core.metadata.OrderItem;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.lab.cms.base.BaseServiceImpl;
 import com.lab.cms.common.ArticleStateMachine;
 import com.lab.cms.common.enums.ArticleAction;
@@ -10,8 +14,10 @@ import com.lab.cms.common.enums.AuditResultEnum;
 import com.lab.cms.common.enums.AuditStageEnum;
 import com.lab.cms.common.exception.BusinessException;
 import com.lab.cms.common.exception.ErrorCode;
+import com.lab.cms.common.result.PageResult;
 import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.CmsArticlePublishDTO;
+import com.lab.cms.dto.CmsArticleQueryDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.entity.CmsArticleAuditLog;
@@ -179,6 +185,32 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
                     ArticleStatus.DRAFT,
                     ArticleStatus.REJECTED,
                     ArticleStatus.WITHDRAWN));
+
+    /**
+     * 列表页允许排序的列白名单（S17）。
+     *
+     * <p>{@code sortField} 最终要拼进 {@code ORDER BY}（MyBatis 的 {@code #{}} 占位符
+     * 不能用于列名），所以这里是**字符串进入 SQL 文本的唯一入口**，
+     * 必须走白名单。两层防线：
+     * <ol>
+     *   <li>{@code PageQuery.checkSortField()} —— 格式正则 {@code ^[A-Za-z_][A-Za-z0-9_]{0,63}$}，
+     *       挡掉 "create_time; DROP TABLE"、"1=1"、含 NUL 的绕过样本；</li>
+     *   <li>本白名单 —— 只认"表里真实存在且允许排序"的列名。</li>
+     * </ol>
+     * <p>⚠️ 白名单里写的是**数据库列名**（下划线），不是 Java 属性名：
+     * {@code OrderItem} 最终拼进 SQL 的是列名。前端 {@code PageTable} 的
+     * {@code columns[].sortField} 也按这个约定传（如 {@code create_time}）。
+     * 传 {@code createTime} 会被判"格式合法但不在白名单" → 400，
+     * 报错信息里会列出可选值，比数据库层的 {@code Unknown column} 友好得多。
+     *
+     * <p>⚠️ 刻意**只**放这些"业务上说得通"的列：允许按 {@code deleted}（逻辑删除标记）
+     * 或 {@code version}（乐观锁号）排序没有业务意义，还会给"探测软删除数据"提供侧信道。
+     * {@code id} 虽然技术上等价于"按创建顺序"，但它是稳定的全序键，
+     * 保留它可以给前端一个"最近创建的在前"的确定选项。
+     */
+    private static final String[] LIST_SORTABLE_COLUMNS = {
+            "create_time", "update_time", "publish_time", "view_count", "title", "id"
+    };
 
     /**
      * 排期时间与"当前时间"之间至少要留出的分钟数（S13）。
@@ -1432,6 +1464,185 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         target.setViewCount(src.getViewCount());
         target.setCreateTime(src.getCreateTime());
         target.setUpdateTime(src.getUpdateTime());
+    }
+
+    // ==================== 十、分页检索（S17） ====================
+
+    /**
+     * 文章分页检索。实现要点与判据见 {@link ArticleService#pageArticles(CmsArticleQueryDTO)}。
+     *
+     * <h3>为什么用"方案 B"（主表分页 + 批量查关联表 + 内存拼装）</h3>
+     * <p>三种写法的对比（详见 {@code docs/SQL优化记录.md}）：
+     * <ul>
+     *   <li><b>方案 A：XML 写 JOIN</b> —— 一次 SQL 拿到全部字段。代价是 MP 的分页插件
+     *       对自定义 SQL 的 {@code COUNT} 需要手写 {@code countSql}（否则可能算错总数），
+     *       而且"文章 → 分类/作者"是<b>多对一</b>，JOIN 让主表行数不变、但一旦以后
+     *       要关联一对多的表（如标签），分页总数就会被 JOIN 放大 —— 那时必须重构。</li>
+     *   <li><b>方案 B：批量查 + 内存拼装</b> —— SQL 条数固定（不论本页 10 条还是 100 条都是
+     *       2 + 2 条），与 MP 分页插件天然兼容，与 S11 详情接口的做法一致。</li>
+     *   <li><b>方案 C：{@code @TableField(exist=false)} + 逐条填充</b> —— 每行一次查询，
+     *       本页 100 条就是 200 条 SQL，标准 N+1，不采纳。</li>
+     * </ul>
+     * <p>选 B 的决定性理由是"SQL 条数不随数据量增长"这个可判定的指标 ——
+     * 方案 A 也能做到，但方案 B 与已有代码（详情接口）口径一致，
+     * 不会出现"同一个项目里两种拼装方式"。
+     */
+    @Override
+    public PageResult<CmsArticleVO> pageArticles(CmsArticleQueryDTO query) {
+        CmsArticleQueryDTO q = (query == null) ? new CmsArticleQueryDTO() : query;
+
+        // ① 归一化 page/size/sortOrder（修非法值，不抛异常）。
+        //    ⚠️ 每个分页查询方法开头都必须调一次：不调的话 size=999999 会真的去查十万条，
+        //    而 page=-1 会直接把负偏移送给 MySQL。
+        q.normalize();
+
+        // ② 时间区间自洽性。beginTime > endTime 是"请求本身矛盾"，
+        //    与"只传一端"（合法，语义是"此后所有/此前所有"）要区分开：
+        //    前者明确报 400，后者放行 —— 静默返回空列表会让前端以为"这段时间真的没有文章"。
+        if (q.getBeginTime() != null && q.getEndTime() != null
+                && q.getBeginTime().isAfter(q.getEndTime())) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR,
+                    "开始时间不能晚于结束时间");
+        }
+
+        // ③ 过滤条件。为 null 一律不加条件 —— 列表页的语义是"按给定条件过滤"，
+        //    不是"没填就查不到"。所有条件都是 AND 关系。
+        LambdaQueryWrapper<CmsArticle> wrapper = Wrappers.<CmsArticle>lambdaQuery();
+
+        if (StringUtils.hasText(q.getTitle())) {
+            // ⚠️ 这里刻意**不用** MP 的 .like()：
+            //    .like() 生成 `title LIKE CONCAT('%', ?, '%')`，用户传 "%" 会变成 '%%%'，
+            //    语义从"搜含百分号的标题"悄悄变成"匹配所有文章"。
+            //    转义 % 和 _ 之后，用户在搜索框里打的就是字面量。
+            //    {0} 是 MP 的**参数占位符**（最终走 PreparedStatement 绑定），不是字符串拼接 —
+            //    所以这里没有注入面，与手写 ${} 是两回事。
+            wrapper.apply("title LIKE {0}", likePattern(q.getTitle()));
+        }
+        if (q.getCategoryId() != null) {
+            wrapper.eq(CmsArticle::getCategoryId, q.getCategoryId());
+        }
+        if (q.getStatus() != null) {
+            // ⚠️ 这里直接 eq 而不是先转 ArticleStatus：脏值（如 99）应当"查不到数据"，
+            //    而不是 400 把整个列表页打掉 —— 与 CmsArticleQueryDTO 类注释的口径一致。
+            wrapper.eq(CmsArticle::getStatus, q.getStatus());
+        }
+        if (q.getAuthorId() != null) {
+            wrapper.eq(CmsArticle::getAuthorId, q.getAuthorId());
+        }
+        if (q.getBeginTime() != null) {
+            wrapper.ge(CmsArticle::getCreateTime, q.getBeginTime());
+        }
+        if (q.getEndTime() != null) {
+            wrapper.le(CmsArticle::getCreateTime, q.getEndTime());
+        }
+
+        // ④ 分页 + 排序。toMpPage(白名单) 内部先做格式正则、再查白名单，
+        //    非白名单列名在这里就变成 400（"不支持按 xxx 排序，可选：…"）。
+        Page<CmsArticle> mpPage = q.toMpPage(LIST_SORTABLE_COLUMNS);
+        if (!q.hasSortField()) {
+            // ⚠️ 没有显式排序也必须给一个**确定的全序**：
+            //    MySQL 对"没有 ORDER BY"的查询不保证返回顺序，翻页时同一行可能出现在两页、
+            //    另一行可能一次都不出现（这是线上常见的"翻页丢数据"来源）。
+            //    create_time 有可能撞（秒精度），所以再补 id 兜底。
+            mpPage.addOrder(OrderItem.desc("create_time"), OrderItem.desc("id"));
+        }
+
+        // ⑤ 两次 SQL：COUNT(*) + 分页主查询（MP 分页插件自动加 LIMIT，不用手写）
+        IPage<CmsArticle> page = baseMapper.selectPage(mpPage, wrapper);
+        List<CmsArticle> rows = page.getRecords();
+
+        if (rows.isEmpty()) {
+            // ⚠️ 空页直接返回，不去发关联表的 SQL：
+            //    selectBatchIds(空集合) 会拼出 `IN ()` —— 那是 MySQL **语法错误**（不是"返回空"），
+            //    这个坑在 S11 的 selectNicknames 上已经踩过一次。
+            //    所以条数是"有数据页 3~4 条 / 空结果页 1 条"，两头都不随数据量变化
+            //    —— 这就是"没有 N+1"的判据。
+            //    ⚠️ 空结果页只有 1 条（不是 2 条）：MP 的 PaginationInnerInterceptor
+            //    continuePage() 在 offset >= total 时连主查询都跳过（S17 真机实测订正）。
+            return new PageResult<>(new ArrayList<>(), page.getTotal(), page.getCurrent(), page.getSize());
+        }
+
+        // ⑥ 收集本页出现的外键，批量查两张关联表。
+        //    ⚠️ 这一步是"没有 N+1"的关键：不论本页 10 条还是 100 条，都只发 1 条 sys_user
+        //    + 1 条 cms_category。用 LinkedHashSet 去重（100 条文章通常只来自几个作者、几个分类）。
+        //    author_id 是 NOT NULL 列，所以这个集合非空、sys_user 那条查询一定会发，
+        //    SQL 条数因此是稳定的（不会因为"恰好只有一个作者"而少一条）。
+        Set<Long> userIds = new LinkedHashSet<>();
+        Set<Long> categoryIds = new LinkedHashSet<>();
+        for (CmsArticle row : rows) {
+            if (row.getAuthorId() != null) {
+                userIds.add(row.getAuthorId());
+            }
+            if (row.getCategoryId() != null) {
+                categoryIds.add(row.getCategoryId());
+            }
+        }
+        Map<Long, String> nicknames = selectNicknames(userIds);
+        Map<Long, String> categoryNames = selectCategoryNames(categoryIds);
+
+        // ⑦ 内存拼装。CmsArticleVO **不含 content**（正文 LONGTEXT）：
+        //    列表页给整页正文的代价是响应体从几百字节涨到几十 KB（S15 实测差值 53 倍）。
+        List<CmsArticleVO> list = new ArrayList<>(rows.size());
+        for (CmsArticle row : rows) {
+            CmsArticleVO vo = new CmsArticleVO();
+            // 复用详情接口的字段搬运（copyBaseFields 的参数收的是父类型，
+            // 所以详情 VO 与列表 VO 共用同一份映射，不会出现"详情改了文案列表没跟上"）
+            copyBaseFields(row, vo);
+            vo.setAuthorName(nicknames.get(row.getAuthorId()));
+            vo.setCategoryName(row.getCategoryId() == null ? null : categoryNames.get(row.getCategoryId()));
+            list.add(vo);
+        }
+
+        log.debug("文章列表查询 | page={} size={} total={} 本页={} 条",
+                page.getCurrent(), page.getSize(), page.getTotal(), list.size());
+
+        return new PageResult<>(list, page.getTotal(), page.getCurrent(), page.getSize());
+    }
+
+    /**
+     * 把查询关键字转成 {@code LIKE} 的匹配串，并转义通配符。
+     *
+     * <p>⚠️ 转义字符用的是反斜杠 —— 依赖 MySQL 的默认 {@code ESCAPE '\\'}。
+     * 已核实本机 {@code sql_mode} 不含 {@code NO_BACKSLASH_ESCAPES}
+     * （{@code SELECT @@sql_mode} = {@code ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,
+     * NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION}）。
+     * 若哪天这个 mode 被打开，转义会失效（不会报错，只会变成"匹配所有"）——
+     * 所以这条依赖写在注释里，改数据库配置时要连带检查。
+     *
+     * <p>替换顺序也有讲究：<b>先转义反斜杠本身</b>，再转义 {@code %} 与 {@code _}。
+     * 反过来的话，{@code "%"} → {@code "\\%"} → 再转义反斜杠 → {@code "\\\\%"}，
+     * 变成一个"匹配一个反斜杠 + 任意串"的模式，与用户意图不符。
+     */
+    private static String likePattern(String keyword) {
+        String escaped = keyword
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
+        return "%" + escaped + "%";
+    }
+
+    /**
+     * 批量取分类名（S17）。
+     *
+     * <p>与 {@link #selectCategoryName(Long)} 的分工：那个是"详情页单个分类"，走主键点查；
+     * 这个是"列表页一页的多个分类"，走 {@code selectBatchIds} 一条 IN 查询。
+     * 保留两个方法而不是让详情也走批量：详情只需要 1 个分类，
+     * 为了"统一"而多构造一次集合，反而把一条主键点查变成一条 IN 查询。
+     *
+     * <p>空集合提前返回（同 {@link #selectNicknames}）：{@code IN ()} 是 MySQL 语法错误。
+     * 查不到的分类不编造名字，返回 null 让前端用 {@code || '—'} 兜底 ——
+     * 与 S14 记录的"分类不存在不报错"是同一件事的两面（缺陷 D-03）。
+     */
+    private Map<Long, String> selectCategoryNames(Collection<Long> categoryIds) {
+        if (categoryIds == null || categoryIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<CmsCategory> categories = categoryMapper.selectBatchIds(categoryIds);
+        Map<Long, String> map = new HashMap<>(Math.max(4, categories.size() * 2));
+        for (CmsCategory category : categories) {
+            map.put(category.getId(), category.getCategoryName());
+        }
+        return map;
     }
 
     // ==================== 私有工具 ====================

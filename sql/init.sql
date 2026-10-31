@@ -3,6 +3,9 @@
 --  项目：基于实验二 SSM 整合升级 · 企业级 CMS 内容管理系统（课程项目设计）
 --  数据库：cms_db    字符集：utf8mb4 / utf8mb4_general_ci    引擎：InnoDB
 --  版本：V1.0        编制：成员A        日期：2026-10-08
+--  修订：S17（10-31）索引优化两处：cms_article 补 idx_deleted_create_time；
+--        cms_article_audit_log 的 idx_article_stage 替换为 idx_article_time。
+--        理由与实测数据见 docs/SQL优化记录.md
 --
 --  ★ 本脚本可重复执行：先按依赖倒序 DROP，再按正序 CREATE
 --  ★ 使用逻辑外键（不用 FOREIGN KEY 物理约束），便于逻辑删除与数据维护
@@ -284,6 +287,12 @@ CREATE TABLE `cms_article` (
     KEY `idx_category_id` (`category_id`),
     KEY `idx_author_id` (`author_id`),
     KEY `idx_status_create_time` (`status`, `create_time`),
+    -- S17 新增：支撑列表页默认排序 ORDER BY create_time DESC, id DESC。
+    -- 本项目所有查询都带 deleted = 0，故把 deleted 作为前导列（等值常量 → 后续列仍有序）；
+    -- InnoDB 二级索引隐含主键，本索引实际等价于 (deleted, create_time, id)，
+    -- 可直接满足该排序并反向扫描，消除 filesort；COUNT(deleted=0) 也可走索引覆盖。
+    -- 实测（5 万行基准表）：Table scan + filesort 19.3ms → Backward index scan 0.04ms。
+    KEY `idx_deleted_create_time` (`deleted`, `create_time`),
     KEY `idx_status_schedule_time` (`status`, `schedule_time`),
     KEY `idx_title` (`title`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '文章主表';
@@ -306,7 +315,12 @@ CREATE TABLE `cms_article_audit_log` (
     `update_time`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`           TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    KEY `idx_article_stage` (`article_id`, `audit_stage`),
+    -- S17 修订：原 idx_article_stage(article_id, audit_stage) 的第二列是死列
+    -- —— 全项目没有任何 SQL 按 audit_stage 过滤（getAuditStage() 只用于出参映射），
+    -- 它唯一被使用的场景是详情页"按 article_id 取整条流水并排序"。
+    -- 改为 (article_id, audit_time)：article_id 前缀能力不变，且直接支撑
+    -- ORDER BY audit_time ASC, id ASC，消除 filesort（索引条数不变，无额外写放大）。
+    KEY `idx_article_time` (`article_id`, `audit_time`),
     KEY `idx_audit_time` (`audit_time`),
     KEY `idx_auditor_id` (`auditor_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '文章审核流水表';

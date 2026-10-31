@@ -4,17 +4,20 @@ import com.lab.cms.annotation.OperLog;
 import com.lab.cms.annotation.RequirePermission;
 import com.lab.cms.base.BaseController;
 import com.lab.cms.common.enums.OperType;
+import com.lab.cms.common.result.PageResult;
 import com.lab.cms.common.result.Result;
 import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.BatchSubmitDTO;
 import com.lab.cms.dto.CmsArticleOfflineDTO;
 import com.lab.cms.dto.CmsArticlePublishDTO;
+import com.lab.cms.dto.CmsArticleQueryDTO;
 import com.lab.cms.dto.CmsArticleRollbackDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.service.ArticleService;
 import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
 import com.lab.cms.vo.CmsArticleDetailVO;
+import com.lab.cms.vo.CmsArticleVO;
 import com.lab.cms.vo.CmsArticleVersionVO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -31,7 +34,8 @@ import java.util.List;
 /**
  * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个，
  * S11 追加"详情/流水"两个，S13 追加"立即发布/排期发布"两个，
- * S14 追加"撤回/下架/归档"三个，S15 追加"版本列表/版本回滚"两个）。
+ * S14 追加"撤回/下架/归档"三个，S15 追加"版本列表/版本回滚"两个，
+ * S17 追加"分页检索"一个）。
  *
  * <h3>本类只做四件事</h3>
  * <p>收参 → 交给 {@code @Valid} 校验 → 调 Service → 封装 {@code Result}。
@@ -77,6 +81,39 @@ public class ArticleController extends BaseController {
 
     @Autowired
     private ArticleService articleService;
+
+    /**
+     * 文章分页检索（列表页数据源，S17 补齐）。
+     *
+     * <p>{@code GET /api/v1/articles}，权限 {@code article:view}。
+     * 参数：{@code page / size / sortField / sortOrder} +
+     * {@code title / categoryId / status / authorId / beginTime / endTime}（全部可选）。
+     *
+     * <h3>⚠️ 路径为什么是"空"</h3>
+     * <p>类上已经有 {@code @RequestMapping("/api/v1/articles")}，
+     * 所以方法上写空 {@code @GetMapping} 得到的就是集合资源本身。
+     * 它与 {@code @GetMapping("/{id}")}（详情）不会冲突：后者需要多一个路径段；
+     * Spring 的路径匹配也优先精确匹配，{@code /articles} 不会被 {@code /{id}} 抢走。
+     *
+     * <h3>⚠️ 权限码用 {@code article:view}，不是契约 §1.3 写的 {@code article:list}</h3>
+     * <p>库表 {@code sys_permission} 里<b>没有</b> {@code article:list} 这个码
+     * （见 {@code docs/接口分类与鉴权表.md} 开头）。照契约写会让
+     * {@code PermissionAspect} 认为所有角色都缺该权限，<b>连 admin 都被 403</b>。
+     * 列表是只读接口，与详情、流水、版本列表同权限码，口径一致。
+     *
+     * <h3>⚠️ 不加 {@code @OperLog}</h3>
+     * <p>与详情/流水/版本列表一致：查询类接口不记操作日志，
+     * 否则列表页翻一页就是一条日志，{@code sys_oper_log} 会迅速膨胀到不可用
+     * （这条双向约束已被 {@code ApiPermissionCoverageTest} 钉住）。
+     *
+     * @param query 查询条件（Spring MVC 从 query string 绑定，各字段可缺省）
+     * @return 分页结果 {@code {records, total, current, size, pages}}，元素为列表 VO（不含正文）
+     */
+    @GetMapping
+    @RequirePermission("article:view")
+    public Result<PageResult<CmsArticleVO>> pageArticles(CmsArticleQueryDTO query) {
+        return Result.success(articleService.pageArticles(query));
+    }
 
     /**
      * 新建草稿。

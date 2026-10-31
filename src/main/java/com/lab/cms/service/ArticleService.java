@@ -1,13 +1,16 @@
 package com.lab.cms.service;
 
 import com.lab.cms.base.BaseService;
+import com.lab.cms.common.result.PageResult;
 import com.lab.cms.dto.ArticleAuditDTO;
 import com.lab.cms.dto.CmsArticlePublishDTO;
+import com.lab.cms.dto.CmsArticleQueryDTO;
 import com.lab.cms.dto.CmsArticleSaveDTO;
 import com.lab.cms.entity.CmsArticle;
 import com.lab.cms.vo.ArticleAuditLogVO;
 import com.lab.cms.vo.BatchSubmitResultVO;
 import com.lab.cms.vo.CmsArticleDetailVO;
+import com.lab.cms.vo.CmsArticleVO;
 import com.lab.cms.vo.CmsArticleVersionVO;
 
 import java.time.LocalDateTime;
@@ -653,4 +656,70 @@ public interface ArticleService extends BaseService<CmsArticle> {
      *         已归档→11011；版本不存在→11009；乐观锁冲突→11010
      */
     void rollbackVersion(Long articleId, Integer versionNo, Long operatorId);
+
+    // ==================== 十、分页检索（S17） ====================
+
+    /**
+     * 文章分页检索（列表页数据源）。
+     *
+     * <p>这是文章模块<b>最后补上的一个接口</b>：F06 写前端列表页时已经按契约
+     * 调了 {@code GET /api/v1/articles}（`api/modules/article.js#pageArticles`），
+     * 但后端一直没实现 —— S16 联调把它记为缺口 D-01，S17 补上。
+     *
+     * <h3>为什么返回值是 {@link PageResult} 而不是 MP 的 {@code IPage}</h3>
+     * <p>{@code IPage} 序列化出来有十几个字段（含 {@code orders}/{@code optimizeCountSql}/
+     * {@code searchCount} 等内部状态），前端要过滤。{@code PageResult} 固定五个字段，
+     * 与 F04 的 {@code PageTable.vue} 直接对齐（它读的就是 {@code records/total/current/size}）。
+     *
+     * <h3>⚠️ 为什么这个方法<b>不</b>收 {@code operatorId}</h3>
+     * <p>与本接口契约的读接口口径一致（见 {@code docs/接口分类与鉴权表.md} §二.5）：
+     * 详情、审核流水、版本列表都<b>刻意不设归属限制</b> —— 后台是协作场景，
+     * 编辑与主编必须能打开/列出<b>任何</b>人的文章才能审、才能核对。
+     * 列表只是在详情的基础上多了一个"枚举"的能力，既然详情已放开，列表单独收紧就自相矛盾。
+     * <p>因此 {@code query.authorId} 是<b>普通筛选条件</b>，不是安全边界
+     * （前端"我的投稿"页用它把自己筛出来，那是产品需求，不是权限）。
+     * 被限制的是"改"，不是"看"。
+     *
+     * <h3>⚠️ 关于 {@code CmsArticleQueryDTO} 类注释里的越权警告</h3>
+     * <p>该 DTO 的 {@code authorId} 字段注释写着"Service 必须用当前登录用户 id 覆盖
+     * 或不接受前端传的 authorId，否则就是改个参数就能看别人草稿"。
+     * <b>本实现不采纳这条</b>，理由见上：那是一条"读接口要不要按归属过滤"的策略问题，
+     * 而本项目在 S11/S12/S15 三次都选了"读不限制"。这是**口径统一**，不是漏做防护。
+     * 该注释已登记为待订正项（与 {@code CmsArticleVO} 的分类名注释同类）。
+     *
+     * <h3>SQL 条数（S17 的硬判据）</h3>
+     * <p>固定 **3~4 条**，且<b>不随数据量增长</b>（真机实测：本页 10 条与 20 条都是 4 条）：
+     * <ol>
+     *   <li>{@code COUNT(*)}（MP 分页插件自动生成）</li>
+     *   <li>主表分页查询（同理自动加 {@code LIMIT}）</li>
+     *   <li>按本页出现的 {@code author_id/publisher_id} 集合批量查 {@code sys_user}
+     *       （取昵称与用户名）</li>
+     *   <li>按本页出现的 {@code category_id} 集合批量查 {@code cms_category}（取分类名）</li>
+     * </ol>
+     * 第 3、4 条在本页为空集时跳过（{@code selectBatchIds(空)} 会生成 {@code IN ()}，
+     * 那是 MySQL 语法错误）；{@code category_id} 全为 {@code null} 时第 4 条也跳过 →
+     * 所以有数据页是 **4 条（本页有分类）/ 3 条（本页无分类）**。
+     *
+     * <h3>⚠️ 空结果页只有 1 条，不是 2 条（S17 真机实测订正）</h3>
+     * <p>原以为空结果页是"COUNT + 主查询"2 条，<b>实测是 1 条</b>：
+     * {@code GET /articles?page=99&size=10}（总数 20）在 {@code cms.log} 里只留下
+     * {@code selectList_mpCount} 一条 {@code Preparing:}。
+     * 原因是 MP {@code PaginationInnerInterceptor} 的 {@code continuePage()}：
+     * 跑完 count 后若 {@code offset >= total} 就<b>直接跳过主查询</b>
+     * （{@code (99-1)*10 = 980 >= 20}）。总数本来就为 0 时同理。
+     * <p>也就是说条数是 **有数据页 3~4 条 / 越界或空结果页 1 条**，
+     * 两头都不随数据量变化 —— 这正是"没有 N+1"的判据。
+     *
+     * <h3>⚠️ 排序字段的列名白名单</h3>
+     * <p>{@code sortField} 拼进 {@code ORDER BY} 天然是注入面，走
+     * {@code PageQuery.checkSortFieldIn(列名...)}：只认**数据库列名**（下划线），
+     * 传驼峰（{@code createTime}）会被拒成 400。前端 {@code PageTable} 的
+     * {@code columns[].sortField} 已经按这个约定写。
+     *
+     * @param query 过滤 + 分页 + 排序条件；各过滤字段为 {@code null} 表示不参与过滤
+     * @return 分页结果（含分类名、作者名等展示字段，<b>不含正文</b>）
+     * @throws com.lab.cms.common.exception.BusinessException
+     *         分页/排序参数非法→10400（HTTP 400）
+     */
+    PageResult<CmsArticleVO> pageArticles(CmsArticleQueryDTO query);
 }
