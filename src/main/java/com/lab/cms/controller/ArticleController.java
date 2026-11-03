@@ -160,7 +160,7 @@ public class ArticleController extends BaseController {
      * 这比"静默成功"更好：用户明确知道第一次已经生效了。
      *
      * <p>为什么"提交"用 {@code POST /{id}/submit} 而不是
-     * {@code PUT /{id}/status}：提交审核是一个<b>领域动作</b>，
+     * {@code PUT /{id}/status}：提交初审是一个<b>领域动作</b>，
      * 不是"把 status 字段替换成某个值"。用动作式 URL 后，
      * 客户端无法直接指定目标状态 —— 目标状态由状态机决定，
      * 客户端连"我想跳到已发布"这种表达机会都没有。

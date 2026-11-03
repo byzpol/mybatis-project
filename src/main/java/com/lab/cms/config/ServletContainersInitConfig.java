@@ -55,7 +55,9 @@ public class ServletContainersInitConfig extends AbstractAnnotationConfigDispatc
      */
     @Override
     protected Class<?>[] getRootConfigClasses() {
-        return new Class[]{SpringConfig.class, SchedulingConfig.class};
+        // S18：数组也要写泛型（Class<?>[]），否则返回的是裸类型 Class[]，
+        //      会有 unchecked 转换告警（javac -Xlint:rawtypes 实测报在这里）。
+        return new Class<?>[]{SpringConfig.class, SchedulingConfig.class};
     }
 
     /**
@@ -64,7 +66,8 @@ public class ServletContainersInitConfig extends AbstractAnnotationConfigDispatc
      */
     @Override
     protected Class<?>[] getServletConfigClasses() {
-        return new Class[]{SpringMvcConfig.class};
+        // S18：同上，写成 Class<?>[] 消除裸类型告警。
+        return new Class<?>[]{SpringMvcConfig.class};
     }
 
     /**

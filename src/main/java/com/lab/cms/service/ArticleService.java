@@ -22,11 +22,13 @@ import java.util.List;
  * <p>继承 {@link BaseService} 获得 MP 的通用 CRUD 能力；
  * 本接口只声明<b>文章域特有的、无法用通用 CRUD 表达的</b>业务动作。
  *
- * <h3>⚠️ S07 只定签名，不写实现</h3>
- * <p>本步（S07）的产出目标是"骨架"：把方法名、参数、返回值定下来，
- * 让前后端与同组其他人能据此对齐接口。
- * 具体实现（状态流转、写审核流水、版本快照、并发控制）安排在 S09 起逐步补齐，
- * 届时 {@code ArticleServiceImpl} 中对应方法体里的 {@code TODO} 会被替换。
+ * <h3>⚠️ 关于"S07 只定签名"</h3>
+ * <p>本接口在 S07 落地时确实只定了签名（产出目标是"骨架"：把方法名、参数、
+ * 返回值定下来，让前后端与同组其他人据此对齐接口）。<b>该状态已经结束</b>：
+ * S09~S17 已把全部方法实现补齐，{@code ArticleServiceImpl} 中不再有 TODO。
+ * 保留这段说明，是因为 S07 的实测记录
+ * （{@code docs/S07-文章模块骨架实测记录.md}）里描述的就是"接口在、实现缺"的
+ * 中间态，两者对不上时以**代码与 S09 之后的记录**为准。
  *
  * <h3>⚠️ 为什么这些方法要写在 Service 而不是 Controller</h3>
  * <p>以 {@link #submitForAudit(Long, Long)} 为例，它实际要做的事：
@@ -88,7 +90,7 @@ public interface ArticleService extends BaseService<CmsArticle> {
     void updateDraft(Long id, CmsArticleSaveDTO dto, Long operatorId);
 
     /**
-     * 提交审核：{@code DRAFT / REJECTED → PENDING_EDITOR}。
+     * 提交初审：{@code DRAFT / REJECTED → PENDING_EDITOR}。
      *
      * <p>提交前应校验内容完整性（标题、正文、分类齐全）——
      * 这些校验放在这里而不是 DTO 上，因为"保存草稿"允许内容不全，
@@ -104,7 +106,7 @@ public interface ArticleService extends BaseService<CmsArticle> {
     void submitForAudit(Long id, Long operatorId);
 
     /**
-     * 批量提交审核。
+     * 批量提交初审。
      *
      * <h3>为什么要有这个方法，而不是让前端循环调单个提交</h3>
      * <p>作者常一次写完好几篇草稿，逐个点太累。但批量接口不是"循环调用单条"的简单包装，
@@ -612,7 +614,7 @@ public interface ArticleService extends BaseService<CmsArticle> {
      * <p><b>为什么"已发布(5)"不能直接回滚</b>：已发布的内容是<b>线上</b>内容。
      * 允许一步回滚意味着"任何有这个权限的人可以在不经过审核的情况下改变读者看到的东西"，
      * 而那正是审核流程存在的意义。想改已发布文章的正文，正确路径是
-     * <b>先撤回 → 再回滚 → 重新提交审核 → 重新发布</b>，
+     * <b>先撤回 → 再回滚 → 重新提交初审 → 重新发布</b>，
      * 每一步都在状态机里有据可查。这条约束让"回滚"永远只作用于
      * "还没对读者生效"的稿子，风险面小得多。
      * <p>更硬的一条理由：{@code PUBLISHED(5)} 与 {@code PENDING_*}/{@code SCHEDULED(6)}

@@ -8,7 +8,7 @@ import java.io.Serializable;
 import java.util.List;
 
 /**
- * 批量提交审核入参。
+ * 批量提交初审入参。
  *
  * <h3>为什么单独建一个 DTO，而不是直接收 {@code List<Long>}</h3>
  * <p>让 Controller 可以写成 {@code @RequestBody @Valid BatchSubmitDTO dto}：

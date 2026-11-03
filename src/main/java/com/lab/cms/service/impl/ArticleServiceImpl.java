@@ -149,7 +149,7 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
     /** 快照的修改说明：修改草稿。 */
     private static final String REMARK_UPDATE = "更新草稿";
 
-    /** 快照的修改说明：提交审核。 */
+    /** 快照的修改说明：提交初审。 */
     private static final String REMARK_SUBMIT = "提交初审";
 
     /**
@@ -428,10 +428,10 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         log.info("修改草稿成功 | articleId={} | operatorId={}", id, operatorId);
     }
 
-    // ==================== 三、提交审核 ====================
+    // ==================== 三、提交初审 ====================
 
     /**
-     * 提交审核：{@code DRAFT / REJECTED → PENDING_EDITOR}。
+     * 提交初审：{@code DRAFT / REJECTED → PENDING_EDITOR}。
      *
      * <p>流程：查文章 → 越权校验 → <b>状态机判可提交</b> → 内容完整性校验 →
      * 改状态 → 写一条快照。
@@ -488,7 +488,7 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
     // ==================== 四、批量提交 ====================
 
     /**
-     * 批量提交审核：逐条容错，返回成功数 + 失败清单。
+     * 批量提交初审：逐条容错，返回成功数 + 失败清单。
      *
      * <p>⚠️ <b>本方法刻意不加 {@code @Transactional}</b>，这不是漏写：
      * <ul>
@@ -1761,7 +1761,7 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
     }
 
     /**
-     * 校验"提交审核前内容必须完整"：标题、正文、分类三样齐全。
+     * 校验"提交初审前内容必须完整"：标题、正文、分类三样齐全。
      *
      * <h3>⚠️ 为什么不用 DTO 校验，也不新增专属错误码</h3>
      * <p><b>不用 DTO 校验</b>：因为"保存草稿"允许只填标题
@@ -1786,13 +1786,13 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
         // 也刻意不用 String#trim() —— 它会吃掉码点 ≤ U+0020 的控制字符，
         // 项目在 PageQuery 里已记录过这个坑（"id\0" 会被 trim 洗白）。
         if (!StringUtils.hasText(article.getTitle())) {
-            throw new BusinessException(ErrorCode.PARAM_ERROR, "提交审核前请先填写文章标题");
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "提交初审前请先填写文章标题");
         }
         if (!StringUtils.hasText(article.getContent())) {
-            throw new BusinessException(ErrorCode.PARAM_ERROR, "提交审核前请先填写文章正文");
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "提交初审前请先填写文章正文");
         }
         if (article.getCategoryId() == null) {
-            throw new BusinessException(ErrorCode.PARAM_ERROR, "提交审核前请先选择文章分类");
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "提交初审前请先选择文章分类");
         }
     }
 

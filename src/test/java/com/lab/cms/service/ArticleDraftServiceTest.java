@@ -364,10 +364,13 @@ public class ArticleDraftServiceTest {
         // ⚠️ 断言整句而不是只断言关键词：这句话是 ArticleStateMachine 拼出来的
         // （"文章当前状态为「%s」，不允许执行「%s」"），把动作名也钉住，
         // 才能证明"状态"与"动作"两个占位符都填对了。
-        // 注意动作文案是 ArticleAction.SUBMIT 的 description = "提交审核"
-        // —— 接口文档里的说法是"提交初审"，两者指的是同一个动作，
-        // 这里以代码为准（用户看到的这句文案由状态机产出）。
-        assertEquals("文章当前状态为「已发布」，不允许执行「提交审核」", msg);
+        // 注意动作文案取自 ArticleAction.SUBMIT 的 description。
+        // S18 之前它是"提交审核"，与系统里其余 12+ 处（前端按钮、@OperLog 描述、
+        // 版本快照 remark、接口成功消息、接口分类与鉴权表）用的"提交初审"不一致 ——
+        // 同一个动作，用户在成功与失败时看到两个名字。
+        // S18 已把 description 订正为"提交初审"，本条断言随之更新，从此只有一个名字。
+        // 判据与影响面见 docs/重构记录.md 第二节。
+        assertEquals("文章当前状态为「已发布」，不允许执行「提交初审」", msg);
         assertEquals("状态不得被改动", ArticleStatus.PUBLISHED.getCode(),
                 articleMapper.selectById(id).getStatus());
         System.out.println("[S09] 已发布文章不可提交，返回 11002，message=" + msg);
@@ -395,7 +398,7 @@ public class ArticleDraftServiceTest {
     // ==================== 内容完整性 ====================
 
     /**
-     * 只有标题、没有正文的草稿可以保存，但不能提交审核。
+     * 只有标题、没有正文的草稿可以保存，但不能提交初审。
      *
      * <p>这是"宽松保存 + 严格提交"这条设计取舍的正面验证：
      * {@code saveDraft} 必须成功（草稿允许只占个标题），

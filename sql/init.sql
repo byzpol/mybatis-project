@@ -6,6 +6,12 @@
 --  修订：S17（10-31）索引优化两处：cms_article 补 idx_deleted_create_time；
 --        cms_article_audit_log 的 idx_article_stage 替换为 idx_article_time。
 --        理由与实测数据见 docs/SQL优化记录.md
+--  修订：S18（11-03）逻辑删除与唯一索引的冲突统一处理 —— 全库 9 个唯一键
+--        一律把 `deleted` 追加为**最后一列**（如 uk_tag_name(tag_name)
+--        → uk_tag_name(tag_name, deleted)）。原因、为什么放末列、
+--        为什么不用"deleted 存 id"、以及仍残留的场景，见 docs/重构记录.md 第一节。
+--        ⚠️ 这是零语义变更：本次修改前全库 deleted=1 的行数为 0（实测），
+--        且"老唯一键成立 ⇒ 追加一个恒定等值列后新唯一键必然成立"（可证明）。
 --
 --  ★ 本脚本可重复执行：先按依赖倒序 DROP，再按正序 CREATE
 --  ★ 使用逻辑外键（不用 FOREIGN KEY 物理约束），便于逻辑删除与数据维护
@@ -65,7 +71,8 @@ CREATE TABLE `sys_user` (
     `update_time`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`           TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_username` (`username`),
+    -- S18：追加 deleted 为末列 —— 逻辑删除后重建同名不再撞 1062（见 docs/重构记录.md 第一节）
+    UNIQUE KEY `uk_username` (`username`, `deleted`),
     KEY `idx_status` (`status`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '用户表';
 
@@ -85,7 +92,8 @@ CREATE TABLE `sys_role` (
     `update_time`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`       TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_role_code` (`role_code`)
+    -- S18：追加 deleted 为末列（同上）
+    UNIQUE KEY `uk_role_code` (`role_code`, `deleted`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '角色表';
 
 -- ---------------------------------------------------------------------------
@@ -107,7 +115,8 @@ CREATE TABLE `sys_permission` (
     `update_time`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`           TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_permission_code` (`permission_code`),
+    -- S18：追加 deleted 为末列（同上）
+    UNIQUE KEY `uk_permission_code` (`permission_code`, `deleted`),
     KEY `idx_parent_id` (`parent_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '权限表';
 
@@ -124,7 +133,8 @@ CREATE TABLE `sys_user_role` (
     `update_time`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`       TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_user_role` (`user_id`, `role_id`),
+    -- S18：追加 deleted 为末列（同上）
+    UNIQUE KEY `uk_user_role` (`user_id`, `role_id`, `deleted`),
     KEY `idx_role_id` (`role_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '用户角色关联表';
 
@@ -141,7 +151,8 @@ CREATE TABLE `sys_role_permission` (
     `update_time`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`           TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_role_permission` (`role_id`, `permission_id`),
+    -- S18：追加 deleted 为末列（同上）
+    UNIQUE KEY `uk_role_permission` (`role_id`, `permission_id`, `deleted`),
     KEY `idx_permission_id` (`permission_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '角色权限关联表';
 
@@ -233,7 +244,8 @@ CREATE TABLE `cms_tag` (
     `update_time`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`       TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_tag_name` (`tag_name`),
+    -- S18：追加 deleted 为末列（同上）—— 手册点名的 cms_tag.tag_name 就在这一条
+    UNIQUE KEY `uk_tag_name` (`tag_name`, `deleted`),
     KEY `idx_use_count` (`use_count`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '标签表';
 
@@ -250,7 +262,8 @@ CREATE TABLE `cms_article_tag` (
     `update_time`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`       TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_article_tag` (`article_id`, `tag_id`),
+    -- S18：追加 deleted 为末列（同上）—— 取消标签后重新打同一标签会撞 1062
+    UNIQUE KEY `uk_article_tag` (`article_id`, `tag_id`, `deleted`),
     KEY `idx_tag_id` (`tag_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '文章标签关联表';
 
@@ -341,7 +354,8 @@ CREATE TABLE `cms_article_version` (
     `create_time`       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `deleted`           TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_article_version` (`article_id`, `version_no`),
+    -- S18：追加 deleted 为末列（同上）—— 本域当前无删除版本的入口，故完全充分
+    UNIQUE KEY `uk_article_version` (`article_id`, `version_no`, `deleted`),
     KEY `idx_modifier_id` (`modifier_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '文章版本快照表';
 
@@ -421,7 +435,8 @@ CREATE TABLE `cms_article_index` (
     `update_time`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`       TINYINT         NOT NULL DEFAULT 0      COMMENT '逻辑删除：0=未删除 1=已删除',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_article_id` (`article_id`),
+    -- S18：追加 deleted 为末列（同上）
+    UNIQUE KEY `uk_article_id` (`article_id`, `deleted`),
     KEY `idx_title` (`title`),
     KEY `idx_category` (`category_id`),
     KEY `idx_hot_score` (`hot_score`),

@@ -43,9 +43,9 @@ public class ResultTest {
 
     @Test
     public void testSuccessWithCustomMessage() {
-        Result<Integer> result = Result.success("已提交审核", 42);
+        Result<Integer> result = Result.success("已提交初审", 42);
         assertEquals(Integer.valueOf(200), result.getCode());
-        assertEquals("已提交审核", result.getMessage());
+        assertEquals("已提交初审", result.getMessage());
         assertEquals(Integer.valueOf(42), result.getData());
     }
 
@@ -65,10 +65,10 @@ public class ResultTest {
     public void testFailWithErrorCodeAndCustomMessage() {
         Result<Void> result = Result.fail(
                 com.lab.cms.common.exception.ErrorCode.ARTICLE_STATUS_ILLEGAL,
-                "文章当前状态为「已发布」，不允许提交审核");
+                "文章当前状态为「已发布」，不允许提交初审");
         assertEquals("错误码应来自枚举", Integer.valueOf(11002), result.getCode());
         assertEquals("提示信息应使用自定义的",
-                "文章当前状态为「已发布」，不允许提交审核", result.getMessage());
+                "文章当前状态为「已发布」，不允许提交初审", result.getMessage());
     }
 
     @Test

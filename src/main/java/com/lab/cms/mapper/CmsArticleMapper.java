@@ -47,10 +47,13 @@ public interface CmsArticleMapper extends BaseMapper<CmsArticle> {
      * 虽然能自动命名（{@code param1} 或 {@code arg0}），但依赖这个
      * 会写不出可读的 XML，且一旦将来加第二个参数就全崩。显式起名最稳。
      *
-     * <p><b>⚠️ 本步（S07）只声明接口，XML 留 TODO —— 不写 SQL</b>，
-     * 按手册要求放在业务步骤（S09 检索相关）再补。
-     * 此时若直接调用本方法会抛 {@code BindingException: Invalid bound statement}
-     * —— 这是预期行为，不是 bug。
+     * <p><b>本方法是 S07 声明的签名，SQL 已在 S09 补齐</b>（见
+     * {@code src/main/resources/com/lab/cms/mapper/CmsArticleMapper.xml}
+     * 的 {@code selectIdTitleByKeyword}）。S07 当时只声明接口、XML 留 TODO，
+     * 是为了让"骨架先行、SQL 后补"的顺序在 git 历史里看得见；
+     * 现状是**接口与 XML 都已就位**，可以直接调用。
+     * <p>⚠️ XML 里手写了 {@code AND deleted = 0} —— {@code @TableLogic} 只作用于
+     * MP 自动生成的 SQL，手写 XML 必须自己写。
      *
      * @param keyword 检索关键字（会对标题做 {@code LIKE %keyword%} 匹配）
      * @return 命中文章的 id 与 title 列表；无命中返回空列表（不返回 null）

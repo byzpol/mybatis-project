@@ -57,7 +57,7 @@ public class BusinessException extends RuntimeException {
      * <p>用于"错误码相同但需要补充上下文"的场景，例如：
      * <pre>
      *   throw new BusinessException(ErrorCode.ARTICLE_STATUS_ILLEGAL,
-     *           "文章当前状态为「已发布」，不允许提交审核");
+     *           "文章当前状态为「已发布」，不允许提交初审");
      * </pre>
      * 这样前端 toast 能显示具体原因，比笼统的"文章当前状态不允许该操作"有用得多。
      */

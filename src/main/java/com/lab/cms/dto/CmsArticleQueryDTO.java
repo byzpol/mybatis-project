@@ -68,10 +68,23 @@ public class CmsArticleQueryDTO extends PageQuery implements Serializable {
 
     /**
      * 作者 ID 过滤，可选。
-     * <p>⚠️ 这个字段的权限含义要小心（S12 鉴权时处理）：
-     * 普通作者只能查自己的文章，所以 Service 必须<b>用当前登录用户 id
-     * 覆盖或不接受前端传的 authorId</b>，否则就是"改个参数就能看别人草稿"的水平越权。
-     * 这里保留字段是给管理员/编辑按作者筛选用的。
+     * <p><b>本字段是普通筛选条件，<u>不是</u>数据安全边界</b>（S17 定、S18 订正本注释）。
+     * <p>早期版本的注释写的是"Service 必须用当前登录用户 id 覆盖或不接受前端传的
+     * {@code authorId}"，<b>与已实现行为不符</b>：{@code ArticleServiceImpl#pageArticles}
+     * 的入参里<b>没有</b> {@code operatorId}，签名本身就说明这里不做归属判断 ——
+     * 传别人的 {@code authorId} 确实能查到别人的文章（含草稿与驳回稿）。
+     * <p>这是<b>刻意</b>的口径，不是漏做，理由与实测见
+     * {@code docs/接口分类与鉴权表.md} §二.12：
+     * <ul>
+     *   <li>前端"我的投稿"页用它把自己筛出来，那是产品需求；</li>
+     *   <li>编辑/主编必须能<b>枚举</b>任何人的文章才审得下去；</li>
+     *   <li>本接口只校验功能级权限 {@code article:view}（四角色都有），
+     *       所以"被限制的是「改」，不是「看」"（§二.1 / §二.10 管改）。</li>
+     * </ul>
+     * <p>⚠️ 若验收要求"作者只能看自己的"，改法是在 Service 里对<b>没有</b>
+     * {@code article:manage} 的角色把 {@code authorId} 强制覆盖为当前登录用户 id
+     * （而不是"拒绝接收前端传值"—— 那会让编辑/主编也筛不了别人）。
+     * 该备选方案已登记在 {@code docs/重构记录.md} 的重构优先级表。
      */
     private Long authorId;
 

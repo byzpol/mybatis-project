@@ -9,7 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 批量提交审核的结果。
+ * 批量提交初审的结果。
  *
  * <h2>为什么批量接口的返回值必须能表达"部分成功"</h2>
  *
@@ -107,7 +107,7 @@ public class BatchSubmitResultVO implements Serializable {
         /**
          * 失败原因，**直接取业务异常的 message**，是可展示的中文。
          *
-         * <p>例如"文章当前状态为「已发布」，不允许执行「提交审核」"、
+         * <p>例如"文章当前状态为「已发布」，不允许执行「提交初审」"、
          * "只能操作自己创建的文章"。这些 message 在 {@code ErrorCode} 与
          * {@code ArticleStateMachine} 里就是按"给人看"的标准写的，
          * 这里直接透传，不做二次加工 —— 二次加工必然导致同一件事有两套文案。

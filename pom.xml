@@ -345,6 +345,22 @@
                         <!-- 保留参数名信息，便于 SpringMVC 的 @RequestParam/@PathVariable 在
                              不显式指定 value 时也能按参数名匹配（Spring 5.3 需要 -parameters 或调试信息） -->
                         <arg>-parameters</arg>
+                        <!--
+                            S18：开启全量编译器告警（-Xlint:all）。
+                            作用是把"规约自检"变成**可复现的构建输出** —— 任何人 clone 后
+                            mvn compile 都会看到同一份告警清单，不依赖 IDE 插件，也不需要截图。
+                            刻意**不**加 -Werror：课程项目没有 CI 门禁，
+                            把警告变成编译失败只会让协作变脆（详见 docs/重构记录.md §四）。
+
+                            刻意关掉的三个子项（都是"查过并且确认与本项目代码无关"的噪声，
+                            逐条理由见 docs/重构记录.md §三.4，这里只留结论）：
+                              -serial      字段声明成 Set/List 接口（接口本身未声明 Serializable，
+                                           实际 HashSet/ArrayList 都可序列化）→ 19 条保守告警
+                              -processing  -proc:full + Lombok 场景下的"批注无处理程序"提示
+                              -classfile   依赖 jar 里的 kotlin.Metadata 缺类文件（非本项目代码）
+                            保留 rawtypes/unchecked/deprecation 等"真能指出问题"的子项。
+                        -->
+                        <arg>-Xlint:all,-serial,-processing,-classfile</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>

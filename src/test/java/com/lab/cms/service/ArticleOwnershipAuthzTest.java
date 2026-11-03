@@ -39,7 +39,7 @@ import static org.junit.Assert.fail;
  * <h2>本类覆盖的规则（每条都有正向对照）</h2>
  * <table border="1">
  *   <tr><th>规则</th><th>违规时的码</th><th>正向对照</th></tr>
- *   <tr><td>改草稿 / 提交审核必须是作者本人</td><td>11003</td>
+ *   <tr><td>改草稿 / 提交初审必须是作者本人</td><td>11003</td>
  *       <td>作者改自己的草稿 → 成功</td></tr>
  *   <tr><td>不能审核自己创建的文章</td><td>11004</td>
  *       <td>别人审我的稿 → 成功</td></tr>

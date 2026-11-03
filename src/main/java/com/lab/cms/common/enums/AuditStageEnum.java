@@ -59,7 +59,7 @@ public enum AuditStageEnum {
      * 这种场景下抛异常会导致"一条脏数据让整个审核历史列表 500"，
      * 返回 null 由调用方决定展示"未知环节"更稳妥。
      *
-     * <p>若确需入参校验（如前端提交审核时必须给合法值），
+     * <p>若确需入参校验（如前端提交初审时必须给合法值），
      * 用 {@link #isValid(Integer)} 判断。
      */
     public static AuditStageEnum ofNullable(Integer code) {

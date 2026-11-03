@@ -114,7 +114,7 @@ public final class ArticleStateMachine {
     static {
         Map<String, ArticleStatus> map = new LinkedHashMap<>(32);
 
-        // ---------- 1~2. 提交审核 ----------
+        // ---------- 1~2. 提交初审 ----------
         // 草稿可以提交
         map.put(key(ArticleStatus.DRAFT, ArticleAction.SUBMIT),
                 ArticleStatus.PENDING_EDITOR);
@@ -222,7 +222,7 @@ public final class ArticleStateMachine {
      *   <li>状态为 null → {@code ARTICLE_NOT_FOUND}（数据异常）</li>
      *   <li>状态是终态 → {@code ARTICLE_ARCHIVED_READONLY}（"已归档不可修改"，语义明确）</li>
      *   <li>状态合法但该动作不允许 → {@code ARTICLE_STATUS_ILLEGAL} + 具体原因
-     *       （"文章当前状态为「已发布」，不允许提交审核"）</li>
+     *       （"文章当前状态为「已发布」，不允许提交初审"）</li>
      * </ol>
      * 第 3 点的提示信息把"当前状态"和"想做的动作"都拼进去，
      * 前端直接 toast 出来就是一句人话，不需要前端再翻译。

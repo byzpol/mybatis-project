@@ -527,18 +527,30 @@ public class ArticleVersionServiceTest {
      *
      * <p>⚠️ 这条判据的思路是<b>"不查代码、直接问数据库"</b>。项目里"唯一索引兜底"这个说法
      * 出现在多处注释里，但注释不是证据 —— 索引被人删掉、建错成非唯一索引，
-     * 代码看起来一模一样。这里读 {@code information_schema} 拿到索引列数，
+     * 代码看起来一模一样。这里读 {@code information_schema} 拿到索引列，
      * 再<b>真的插一条重复记录</b>看它是否被拒。
+     *
+     * <p><b>S18 更新</b>：本断言原来只数"复合 2 列"（{@code COUNT(*) = 2}）。
+     * S18 给全库 9 个唯一键统一追加了 {@code deleted} 末列（逻辑删除与唯一索引的冲突，
+     * 见 {@code docs/重构记录.md} 第一节），本索引随之变成 3 列，
+     * <b>这条用例如实报了 FAIL（expected:&lt;2&gt; but was:&lt;3&gt;）</b> ——
+     * 这正是它该有的表现：DDL 改了、断言没改，必须红灯，不能静默通过。
+     *
+     * <p>趁着修它，把断言从"只数个数"<b>加强</b>为"钉住列名与顺序"：
+     * 原来换成 {@code (article_id, title_snapshot)} 之类的错列也能凑够 2 列而通过；
+     * 现在列名与顺序都必须完全一致。
      */
     @Test
     public void testUniqueIndexRejectsDuplicateVersionNo() {
-        Integer indexCols = jdbc().queryForObject(
-                "SELECT COUNT(*) FROM information_schema.statistics"
+        String indexCols = jdbc().queryForObject(
+                "SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index)"
+                        + " FROM information_schema.statistics"
                         + " WHERE table_schema = DATABASE() AND table_name = 'cms_article_version'"
                         + " AND index_name = 'uk_article_version' AND non_unique = 0",
-                Integer.class);
-        assertEquals("uk_article_version 必须存在且为唯一索引（复合 2 列）",
-                2, indexCols.intValue());
+                String.class);
+        assertEquals("uk_article_version 必须是唯一索引，且列顺序为"
+                        + " (article_id, version_no, deleted)（S18 起含 deleted 末列）",
+                "article_id,version_no,deleted", indexCols);
 
         Long id = newDraft("唯一索引");
         try {
@@ -551,7 +563,8 @@ public class ArticleVersionServiceTest {
             // 期望路径：唯一索引生效
         }
         assertEquals("被拒后版本列表不应变化", "[1]", versionNosOf(id).toString());
-        System.out.println("[S15] 唯一索引 uk_article_version 存在且真的拒绝重复 (articleId=" + id + ", versionNo=1)");
+        System.out.println("[S15] 唯一索引 uk_article_version 存在且真的拒绝重复"
+                + "（articleId=" + id + ", versionNo=1；S18 后索引列为 " + indexCols + "）");
     }
 
     /**

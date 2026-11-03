@@ -26,7 +26,7 @@ import java.time.LocalDateTime;
  *       所以 {@link #content} <b>不加 {@code @NotBlank}</b>。</li>
  *   <li><b>标题、分类必填</b>：连标题都没有的文章无法在任何列表里识别，
  *       分类决定文章归属，两者在保存阶段就要求填。</li>
- *   <li>真正严格的"提交审核前必须完整"的校验放在 {@code submitForAudit}
+ *   <li>真正严格的"提交初审前必须完整"的校验放在 {@code submitForAudit}
  *       的 Service 逻辑里（S09 实现），因为那里才知道"这是要提交了"。
  *       <b>入参校验只管"这个字段本身的形态对不对"，不管"业务流程允不允许"。</b></li>
  * </ul>

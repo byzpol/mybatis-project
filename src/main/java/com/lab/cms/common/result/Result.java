@@ -66,7 +66,7 @@ public class Result<T> implements Serializable {
         return new Result<>(200, "操作成功", data);
     }
 
-    /** 成功，带自定义提示与数据（如"已提交审核"）。 */
+    /** 成功，带自定义提示与数据（如"已提交初审"）。 */
     public static <T> Result<T> success(String message, T data) {
         return new Result<>(200, message, data);
     }
@@ -88,7 +88,7 @@ public class Result<T> implements Serializable {
      * <pre>
      *   // 错误码是 ARTICLE_STATUS_ILLEGAL，但提示要说明具体是什么状态
      *   Result.fail(ErrorCode.ARTICLE_STATUS_ILLEGAL,
-     *               "文章当前状态为「已发布」，不允许提交审核")
+     *               "文章当前状态为「已发布」，不允许提交初审")
      * </pre>
      */
     public static <T> Result<T> fail(com.lab.cms.common.exception.ErrorCode errorCode, String message) {

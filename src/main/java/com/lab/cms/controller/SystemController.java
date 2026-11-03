@@ -123,7 +123,7 @@ public class SystemController {
                 // 业务异常带自定义提示：应返回 code=11002 + 具体状态说明
                 throw new com.lab.cms.common.exception.BusinessException(
                         com.lab.cms.common.exception.ErrorCode.ARTICLE_STATUS_ILLEGAL,
-                        "文章当前状态为「已发布」，不允许提交审核");
+                        "文章当前状态为「已发布」，不允许提交初审");
             case 3:
                 // 系统异常：应返回 code=500，且**不泄漏**堆栈
                 throw new IllegalStateException("这是故意抛出的系统异常，用于验证兜底处理器不泄漏堆栈");

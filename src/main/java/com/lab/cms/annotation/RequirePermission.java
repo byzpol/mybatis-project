@@ -40,7 +40,7 @@ import java.lang.annotation.Target;
  *   {@code @RequirePermission({"article:audit", "article:publish"})}
  *
  *   // 多个权限，OR
- *   {@code @RequirePermission(value = {"article:edit", "article:submit"},
+ *   {@code @RequirePermission(value = {"article:update", "article:submit"},
  *                            logical = RequirePermission.Logical.OR)}
  * </pre>
  */

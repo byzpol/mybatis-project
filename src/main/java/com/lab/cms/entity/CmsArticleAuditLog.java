@@ -23,17 +23,47 @@ import java.time.LocalDateTime;
  * <p>每完成一次审核（初审或终审，通过或驳回）写入一行。
  * 它带来三个业务能力：
  * <ol>
- *   <li><b>防重复审核</b>：查 {@code (article_id, audit_stage)} 是否已有记录
- *       （库表有 {@code idx_article_stage} 联合索引直接支撑），有则拒绝 —— 对应错误码
- *       {@code ARTICLE_ALREADY_AUDITED}</li>
- *   <li><b>审核轨迹展示</b>：前端"审核历史"时间线按 {@code audit_time} 正序渲染</li>
+ *   <li><b>审核轨迹展示</b>：前端"审核历史"时间线按 {@code audit_time} 正序渲染
+ *       （排序键是 {@code audit_time ASC, id ASC}，第二键不能省 ——
+ *       {@code audit_time} 只有秒精度，"提交→初审→终审"常落在同一秒）</li>
  *   <li><b>责任追溯</b>：谁在什么时候驳回了哪一版，是答辩时的证据链</li>
+ *   <li><b>驳回意见回传</b>：{@code rejectReason} 取最近一次驳回的 {@code opinion}</li>
  * </ol>
  *
- * <p>⚠️ <b>本表不做逻辑删除的常规查询</b>：审核流水是审计记录，即使关联的文章被删，
- * 流水也应保留（否则单据对不上）。所以查询本表时通常**显式忽略 deleted**，
- * 需要的时候用 {@code @TableField(exist = false)} 之外的裸 SQL 或 XML 查询。
- * 这是一个刻意的例外，不要一刀切认为"所有表查询都自动带 deleted = 0"。
+ * <p>⚠️ <b>"防重复审核"不靠本表，靠状态机</b>（S18 订正，原注释写法有误）：
+ * 早期的注释写的是"查 {@code (article_id, audit_stage)} 是否已有记录，有则拒绝 ——
+ * 对应错误码 {@code ARTICLE_ALREADY_AUDITED}"。实际实现<b>不是</b>这样，两点都错：
+ * <ul>
+ *   <li>{@code ArticleServiceImpl#audit} 只判"当前状态是不是 {@code PENDING_EDITOR} /
+ *       {@code PENDING_CHIEF}"（否则抛 {@code ARTICLE_STATUS_ILLEGAL 11002}，
+ *       终态抛 {@code ARTICLE_ARCHIVED_READONLY 11011}），
+ *       <b>不查本表</b>。重复审核被"状态已经不在待审环节"自然挡住。</li>
+ *   <li>{@code ARTICLE_ALREADY_AUDITED(11005)} 虽然是 {@code ErrorCode} 里的合法枚举，
+ *       但全仓<b>零处引用、从未被抛出</b>（S18 实测：{@code grep -rn "ErrorCode.ARTICLE_ALREADY_AUDITED"}
+ *       在 java 源码里 0 命中）。属"已定义未使用"的常量，见 {@code docs/重构记录.md}。</li>
+ *   <li>原注释提到的 {@code idx_article_stage(article_id, audit_stage)} 联合索引
+ *       已在 S17 被<b>替换</b>为 {@code idx_article_time(article_id, audit_time)}
+ *       —— {@code audit_stage} 在本项目里从不出现在 WHERE 中，是死列。
+ *       理由与实测见 {@code docs/SQL优化记录.md} §四。</li>
+ * </ul>
+ *
+ * <p>⚠️ <b>关于逻辑删除："本表是例外"这个说法是错的</b>（S18 订正）。
+ * 原注释写"查询本表时通常显式忽略 deleted"、"不要一刀切认为所有表查询都自动带
+ * deleted = 0"，<b>与实际代码相反</b>：本实体继承 {@link BaseEntity}，
+ * 于是 {@code auditLogMapper.selectList(...)} 由 MP 自动生成 SQL，
+ * {@code @TableLogic} 生效。真实日志（{@code logs/cms.log}，S18 取）：
+ * <pre>
+ * SELECT id,article_id,audit_stage,auditor_id,result,opinion,audit_time,article_version,
+ *        create_by,create_time,update_by,update_time,deleted
+ *   FROM cms_article_audit_log
+ *  WHERE deleted=0 AND (article_id = ?)
+ *  ORDER BY audit_time ASC,id ASC
+ * </pre>
+ * <p>也就是说 <b>本表和其他 16 张表一样，自动带 {@code deleted = 0}</b>，不是例外。
+ * <p>那"流水要保留"这个设计意图靠什么实现？靠<b>删除时不级联</b>：
+ * {@code deleteById} 是 {@code UPDATE ... SET deleted = 1}（MP 原生语义，
+ * 只动自己一行）。所以即使文章被逻辑删除，流水行自己的 {@code deleted} 仍是 0，
+ * 查得出来。<b>判据是"删文章不会去删流水"，不是"查流水时不带 deleted"</b>。
  */
 @Data
 @EqualsAndHashCode(callSuper = true)

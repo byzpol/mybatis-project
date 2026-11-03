@@ -76,10 +76,13 @@ public class CmsArticleVO implements Serializable {
 
     /**
      * 分类名称（跨表补数据）。
-     * <p>来源：{@code cms_category.name}，由 Service 查一次分类表填充。
+     * <p>来源：{@code cms_category.category_name}（**不是 {@code name}**，
+     * 库表列名见 {@code sql/init.sql} 的 {@code cms_category} 建表段），
+     * 由 Service 查一次分类表填充。
      * <p>⚠️ 批量列表时不要每行查一次库（N+1 问题）——
-     * 应先收集本页所有 {@code categoryId}，一次 {@code IN} 查询建 Map，
-     * 再回填。这是 S09 实现时的注意点。
+     * 应先收集本页所有 {@code categoryId}，一次 {@code IN} 查询建 Map，再回填。
+     * S11 详情接口与 S17 分页检索都按这个写法实现（实测：本页 10 条与 20 条
+     * 的 SQL 条数完全相同）。
      */
     private String categoryName;
 
