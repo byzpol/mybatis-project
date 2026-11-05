@@ -284,13 +284,33 @@ const pageDesc = computed(() =>
  * PageTable 的重置是直接 `delete queryModel[k]`，如果这里用一个独立的 ref 存日期，
  * 重置后输入框里的日期还在、但请求里已经没有时间条件了 —— 出现"看起来筛了但其实没筛"。
  * 用 getter 从 query 反推，二者永远一致。
+ *
+ * ⚠️ S19 修掉的跨模块缺陷（两天前才被发现）：
+ *   1. 选择器是 `type="daterange"` + `value-format="YYYY-MM-DD"`，拿到的是"纯日期"。
+ *      而后端 query string 侧的时间解析**只认 ISO-8601 的 T 分隔写法**
+ *      （`JacksonConfig` 只管 `@RequestBody` 的 JSON，管不到 query string），
+ *      于是 `?beginTime=2026-10-14` 直接 400 —— **创建时间筛选一用就报错**。
+ *      后端已随本步注册了 Web 层转换器（`StringToLocalDateTimeConverter`），
+ *      现在空格分隔、少写秒、纯日期三种写法都能过。
+ *   2. 但"能解析"不等于"语义对"：`endTime=2026-10-20` 会被解析成
+ *      `2026-10-20 00:00:00`，SQL 里 `create_time <= '2026-10-20 00:00:00'`
+ *      **会漏掉 10-20 当天**的文章 —— 这是日期区间右边界最经典的坑。
+ *      所以这里显式把左边界补 `00:00:00`、右边界补 `23:59:59`：
+ *      用户选"10-14 至 10-20"的自然语义就是"含 10-20 全天"。
+ *
+ *   为什么补在全前端而不是后端：后端那个转换器不知道自己是区间左端还是右端，
+ *   只有"知道语义的这一层"才能补对。判据见 docs/AI应用记录.md 与
+ *   docs/联调报告.md 的 D-09。
  */
 const dateRange = computed({
-  get: () => (query.beginTime && query.endTime ? [query.beginTime, query.endTime] : []),
+  get: () => (query.beginTime && query.endTime
+    ? [query.beginTime.slice(0, 10), query.endTime.slice(0, 10)]
+    : []),
   set: (v) => {
     if (Array.isArray(v) && v.length === 2 && v[0] && v[1]) {
-      query.beginTime = v[0]
-      query.endTime = v[1]
+      // 左闭：当天 00:00:00；右闭：当天 23:59:59
+      query.beginTime = `${v[0]} 00:00:00`
+      query.endTime = `${v[1]} 23:59:59`
     } else {
       delete query.beginTime
       delete query.endTime

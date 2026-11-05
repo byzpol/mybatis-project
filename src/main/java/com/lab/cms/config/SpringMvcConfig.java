@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.EnableAspectJAutoProxy;
+import org.springframework.format.FormatterRegistry;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.stereotype.Controller;
@@ -132,6 +133,47 @@ public class SpringMvcConfig implements WebMvcConfigurer {
     @Override
     public void addArgumentResolvers(List<HandlerMethodArgumentResolver> resolvers) {
         resolvers.add(0, new CurrentUserArgumentResolver());
+    }
+
+    /**
+     * 【S19 新增 · 主干加方法，未改任何既有签名】注册 Web 层的
+     * {@code String → LocalDateTime} 转换器。
+     *
+     * <h3>不加这个会怎样（S19 实测发现的真实缺陷）</h3>
+     * <p>{@code GET /api/v1/articles?beginTime=2026-10-14&endTime=2026-10-20}
+     * 会直接返回 <b>400</b>：
+     * <pre>
+     * 参数校验失败：beginTime Failed to convert property value of type 'java.lang.String'
+     * to required type 'java.time.LocalDateTime' for value [2016-10-15 20:34:58]
+     * </pre>
+     *
+     * <p>原因是项目里有<b>两条互不相干的"字符串 → 时间"转换链</b>：
+     * <ul>
+     *   <li>{@code @RequestBody} 的 JSON → {@link JacksonConfig} 的
+     *       {@code LocalDateTimeDeserializer}，只认 {@code yyyy-MM-dd HH:mm:ss}；</li>
+     *   <li>query string 绑定 DTO 属性 → Spring {@code DateTimeFormatterRegistrar} 的默认值，
+     *       只认 ISO-8601 的 {@code T} 分隔写法。</li>
+     * </ul>
+     * <p>同一个前端组件在两处得到不同结果：{@code ArticleEdit.vue} 的排期时间走 JSON 能用，
+     * 而 {@code ArticleList.vue} 的创建时间范围走 query string <b>一用就 400</b>。
+     *
+     * <p>⚠️ 这个缺陷此前没有任何自动化测试能发现：S17 的
+     * {@code ArticlePageQueryServiceTest} 直接 {@code new CmsArticleQueryDTO()} 设值，
+     * 绕过了 Web 绑定；{@code PageQueryTest} 更是纯单元测试。
+     * <b>S19 之前全仓 MockMvc 出现 0 次</b>。
+     *
+     * <h3>为什么注册到 {@code addFormatters} 而不是给 DTO 字段加 {@code @DateTimeFormat}</h3>
+     * <p>{@code @DateTimeFormat} 要逐个字段写，而且只解决"字段级"问题 ——
+     * 将来任何人新增一个 query 上的时间参数，都会重新踩一遍同一个坑。
+     * 注册到全局转换服务则一次性解决，且与"项目只有一种日期书写法"这条口径一致。
+     *
+     * <p>⚠️ 顺序说明：{@code addFormatters} 在 {@code mvcConversionService()} 初始化时被调用，
+     * 此时 {@code GenericConversionService.addConverter} 会<b>覆盖</b>同
+     * {@code ConvertiblePair} 的已注册转换器 —— 这正是我们要的效果（默认的 ISO 解析被换掉）。
+     */
+    @Override
+    public void addFormatters(FormatterRegistry registry) {
+        registry.addConverter(new StringToLocalDateTimeConverter());
     }
 
     /**
