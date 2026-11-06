@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 /**
  * 登录日志实体，对应表 {@code sys_login_log}。
  *
- * <p>登录成功与失败都记录（失败时 {@code loginStatus = 0}）。
+ * <p>登录成功与失败都记录（失败时 {@code loginStatus = 2}）。
  *
  * <h3>为什么失败也要记</h3>
  * <p>"连续登录失败"是账号被盗的第一信号。若只记成功，
@@ -47,8 +47,12 @@ public class SysLoginLog extends BaseEntity {
     private String userAgent;
 
     /**
-     * 登录状态：{@code 1 成功 / 0 失败}。
-     * <p>与 {@code sys_oper_log.status} 的约定一致。
+     * 登录状态：{@code 1 成功 / 2 失败}。
+     * <p>⚠️ 取值以**库表**为准（{@code sys_login_log.login_status} 的列注释与种子数据
+     * 都是 {@code 1}/{@code 2}）。历史代码传的是 {@code 0}，与本注释此前的
+     * {@code "1 成功 / 0 失败"} 一样属于口径不一致，S20 已统一到 {@code 1/2}。
+     * <p>注意它**不**与 {@code sys_oper_log.status} 同口径：后者的 1/0 表示成功/失败，
+     * 两者语义相近但取值不同，不要互相套用。
      */
     @TableField("login_status")
     private Integer loginStatus;

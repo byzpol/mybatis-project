@@ -320,18 +320,26 @@ public class ApiPermissionCoverageTest {
         System.out.println("[S12] 豁免清单 " + EXEMPT_METHODS.size() + " 项全部对应到真实接口");
     }
 
-    // ==================== 3. 文章域权限码是否被用满（登记，不强制） ====================
+    // ==================== 3. 文章域权限码是否被用满（S20 起收紧为强制） ====================
 
     /**
-     * 打印文章域权限码的使用情况，<b>不</b>断言"必须全部用上"。
+     * 断言文章域 9 个权限码<b>全部</b>被接口用到。
      *
-     * <p>理由：{@code article:publish/withdraw/manage/delete} 对应的接口
-     * 分别在 S13/S14/S15 才实现，现在断言"用满"必然红。
-     * 这条的价值是<b>把差距显式打出来</b>——S12 结束时它应该恰好剩这几个。
-     * 等 S15 做完，可以把这条改成 {@code assertEquals} 收紧。
+     * <p>这条在 S12 落地时是"只打印、不强制"的 —— 当时
+     * {@code article:publish/withdraw/manage/delete} 对应的接口还没做，
+     * 断言"用满"必然红。S12 的注释写着"等 S15 做完可以改成 {@code assertEquals} 收紧"。
+     *
+     * <p>⚠️ S20 才真正收得动，因为 {@code article:delete} 是<b>最后一个</b>没接口的码：
+     * 它对应的 {@code DELETE /api/v1/articles/{id}} 契约里从 S05 就写着，
+     * 但代码一直没实现（前端列表页的「删除」按钮因此点了 404，S20 回归登记为 D-13）。
+     * S20 补齐后这 9 个码终于一一对应到端点，于是把宽松断言换成 {@link #assertEquals}。
+     *
+     * <p>收紧之后，这条用例的价值从"记录差距"变成"防止漂移"：
+     * 将来若有人删掉某个端点的 {@code @RequirePermission}，
+     * 或者库里少了一个权限码，这里会立刻红。
      */
     @Test
-    public void testReportUnusedArticlePermissionCodes() {
+    public void testAllArticlePermissionCodesAreUsed() {
         Set<String> inDb = new TreeSet<>(permissionCodesInDb());
         Set<String> expectedArticleDomain = new TreeSet<>(Arrays.asList(
                 "article:view", "article:create", "article:update", "article:submit",
@@ -360,13 +368,16 @@ public class ApiPermissionCoverageTest {
 
         System.out.println("[S12] article: 域权限码共 " + expectedArticleDomain.size()
                 + " 个，已被接口使用 " + used.size() + " 个");
-        System.out.println("[S12] 尚未使用的（对应接口还没做，S13/S14/S15 逐步补上）：" + unused);
+        System.out.println("[S20] 未被任何接口使用的权限码：" + (unused.isEmpty() ? "（无）" : unused));
 
-        // 只断言"至少用上了 S12 已实现的那些"，不锁死未实现的
         assertTrue("article:create 没被任何接口使用", used.contains("article:create"));
         assertTrue("article:update 没被任何接口使用", used.contains("article:update"));
         assertTrue("article:submit 没被任何接口使用", used.contains("article:submit"));
         assertTrue("article:audit 没被任何接口使用", used.contains("article:audit"));
         assertTrue("article:view 没被任何接口使用", used.contains("article:view"));
+
+        // ★ S20 收紧：9 个码必须全部落到端点上，一个都不许剩
+        assertEquals("文章域权限码应全部被接口使用（有码无接口说明契约里的端点还没做）",
+                expectedArticleDomain, used);
     }
 }

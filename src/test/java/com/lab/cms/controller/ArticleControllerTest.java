@@ -16,6 +16,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -765,7 +766,217 @@ public class ArticleControllerTest extends AbstractArticleApiTest {
         assertEquals("回滚不改状态，仍在草稿", ArticleStatus.DRAFT.getCode().intValue(), statusOf(id));
     }
 
+    // ==================== 七、删除接口（S20 补齐的 DELETE /articles/{id}） ====================
+
+    /*
+     * 为什么这一组是 S20 才有的：契约 §1.3 第 5 行从 S05 起就写着
+     * DELETE /api/v1/articles/{id} | 删除（仅草稿/驳回态） | article:delete，
+     * 但后端一直没实现（S18 的记录里"文章域没有删除入口"）——
+     * 前端列表页那颗「删除」按钮点下去必然落到统一 JSON 404 上。
+     * S20 回归实测到这一点后，按 S18 留下的方案补齐（S18 的理由是
+     * "行为变更必须配独立用例与回归"，S20 正是带独立用例的回归步）。
+     */
+
+    /**
+     * 作者删自己的草稿：200 + 库里 {@code deleted=1} + 详情/列表都查不到。
+     *
+     * <p>这条同时钉住手册 S20 回归清单第 7 项
+     * （"逻辑删除：删除后列表与详情都查不到"）的三个判据。
+     */
+    @Test
+    public void testAuthorDeletesOwnDraft() throws Exception {
+        String title = uniqueTitle("S20-删除-自己的草稿");
+        Long id = articleService.saveDraft(saveDto(title), AUTHOR_ID);
+
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + id)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+
+        assertEquals("删除草稿应返回 HTTP 200", 200, result.getResponse().getStatus());
+        assertResultShape(result);
+        JsonNode json = body(result);
+        assertEquals("业务码应为 200", 200, json.get("code").asInt());
+        assertEquals("删除接口的成功文案", "文章已删除", json.get("message").asText());
+
+        assertEquals("库里 deleted 应置 1（逻辑删除）", 1, deletedOf(id));
+        assertEquals("物理行必须仍在（逻辑删除不是物理删除）", 1, rowCountOf(id));
+        assertEquals("删除不改 status —— 删的是 deleted 列，不是状态机",
+                ArticleStatus.DRAFT.getCode().intValue(), statusRawOf(id));
+        assertEquals("审计列 update_by 应记为删除人（MP 的 removeById 不会填这两列，"
+                + "所以实现里改用了显式列列的 LambdaUpdateWrapper）",
+                AUTHOR_ID, updateByOf(id));
+
+        MvcResult detail = mockMvc.perform(get("/api/v1/articles/" + id)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+        assertCode(detail, 11001);
+
+        MvcResult list = mockMvc.perform(get("/api/v1/articles")
+                        .param("title", title)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+        assertEquals("逻辑删除后列表 total 应为 0", 0,
+                body(list).get("data").get("total").asInt());
+    }
+
+    /**
+     * 已驳回的稿子同样可删（口径是"草稿 + 已驳回"，不是"只有草稿"）。
+     *
+     * <p>这条与 {@code requireEditable}（改草稿）保持同一集合 ——
+     * 能改的就能删，否则用户会遇到"能编辑但不能删除"的费解组合。
+     */
+    @Test
+    public void testAuthorDeletesOwnRejectedArticle() throws Exception {
+        Long id = seedArticle(AUTHOR_ID, ArticleStatus.REJECTED);
+
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + id)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+
+        assertCode(result, 200);
+        assertEquals("已驳回稿被逻辑删除", 1, deletedOf(id));
+    }
+
+    /**
+     * 非作者删别人的草稿 → 11003（水平越权），且<b>什么都不改</b>。
+     *
+     * <p>权限码 {@code article:delete} 连 {@code ROLE_AUTHOR(7)} 都有，
+     * 若不做归属校验，任何作者都能删光别人的草稿。
+     */
+    @Test
+    public void testDeleteOthersDraftReturns11003() throws Exception {
+        Long id = articleService.saveDraft(saveDto(uniqueTitle("S20-删除-越权")), AUTHOR_ID);
+
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + id)
+                        .session(loginAs(AUTHOR2_ID)))
+                .andReturn();
+
+        assertCode(result, 11003);
+        assertEquals("被拒后 deleted 必须仍是 0", 0, deletedOf(id));
+    }
+
+    /**
+     * 已发布态删除 → 11013；已归档 → 11011。
+     *
+     * <p>两个码分开是刻意的：归档是终态（"永久留档"），
+     * 与"上线过了所以不能删"（该走归档）是不同性质的两个结论。
+     */
+    @Test
+    public void testDeleteNonDraftStatusReturns11013() throws Exception {
+        Long published = seedArticle(AUTHOR_ID, ArticleStatus.PUBLISHED);
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + published)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+        assertCode(result, 11013);
+        assertEquals("被拒后 deleted 必须仍是 0", 0, deletedOf(published));
+    }
+
+    @Test
+    public void testDeleteArchivedReturns11011() throws Exception {
+        Long archived = seedArticle(AUTHOR_ID, ArticleStatus.ARCHIVED);
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + archived)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+        assertCode(result, 11011);
+    }
+
+    /**
+     * 归属校验<b>排在</b>状态校验之前：对"别人的已归档文章"删除，
+     * 拿到的是 11003（越权）而不是 11011（只读）。
+     *
+     * <p>⚠️ 这不是缺陷，是全项目一致的既定顺序（S20 回归报告里登记为"刻意行为"）：
+     * 撤回 / 回滚 / 改草稿 / 提交四条路径都是同一顺序。改顺序会牵动
+     * {@code checkOwnership} 的位置，进而让所有用例的错误码全体漂移。
+     */
+    @Test
+    public void testDeleteOthersArchivedReturns11003Not11011() throws Exception {
+        Long archived = seedArticle(AUTHOR_ID, ArticleStatus.ARCHIVED);
+
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + archived)
+                        .session(loginAs(AUTHOR2_ID)))
+                .andReturn();
+
+        assertCode(result, 11003);
+    }
+
+    /** 未登录 → 401（拦截器层），不是 403、不是业务码。 */
+    @Test
+    public void testDeleteWithoutLoginReturns401() throws Exception {
+        Long id = articleService.saveDraft(saveDto(uniqueTitle("S20-删除-未登录")), AUTHOR_ID);
+
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + id)).andReturn();
+
+        assertEquals("未登录应返回 HTTP 401", 401, result.getResponse().getStatus());
+    }
+
+    /** 对不存在的 id 删除 → 11001（先查文章，再谈状态）。 */
+    @Test
+    public void testDeleteMissingArticleReturns11001() throws Exception {
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + NOT_EXIST_ID)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+        assertCode(result, 11001);
+    }
+
+    /**
+     * 版本快照与审核流水<b>不级联</b>逻辑删除。
+     *
+     * <p>这是 S18 定下的口径（见 {@code docs/重构记录.md} 第一节 (3) 的推荐处置表），
+     * 这里把它变成一条可执行的断言 —— 否则"级联删除"很容易在后续重构里被顺手加上。
+     */
+    @Test
+    public void testDeleteDoesNotCascadeToVersionsOrAuditLogs() throws Exception {
+        Long id = seedArticle(AUTHOR_ID, ArticleStatus.REJECTED);
+        int versionsBefore = countOf("cms_article_version", id);
+        int logsBefore = countOf("cms_article_audit_log", id);
+        assertTrue("准备数据：已驳回稿应至少有 1 个版本快照", versionsBefore >= 1);
+        assertTrue("准备数据：已驳回稿应至少有 1 条审核流水", logsBefore >= 1);
+
+        MvcResult result = mockMvc.perform(delete("/api/v1/articles/" + id)
+                        .session(loginAs(AUTHOR_ID)))
+                .andReturn();
+        assertCode(result, 200);
+
+        assertEquals("版本快照条数不应因删除而变化", versionsBefore, countOf("cms_article_version", id));
+        assertEquals("审核流水条数不应因删除而变化", logsBefore, countOf("cms_article_audit_log", id));
+    }
+
     // ==================== 私有辅助 ====================
+
+    /**
+     * 查 {@code deleted} 真值。
+     *
+     * <p>⚠️ 不能用父类的 {@code statusOf}：它的 WHERE 里带 {@code deleted = 0}，
+     * 逻辑删除之后会返回空结果集（{@code EmptyResultDataAccessException}），
+     * 而不是"deleted = 1"。判断"有没有删掉"必须读这一列本身。
+     */
+    private int deletedOf(Long articleId) {
+        Integer deleted = jdbc().queryForObject(
+                "SELECT deleted FROM cms_article WHERE id = ?", Integer.class, articleId);
+        return deleted == null ? -1 : deleted;
+    }
+
+    /** 查物理行数（不带 {@code deleted} 条件）—— 用来证明"逻辑删除没删物理行"。 */
+    private int rowCountOf(Long articleId) {
+        Integer n = jdbc().queryForObject(
+                "SELECT COUNT(*) FROM cms_article WHERE id = ?", Integer.class, articleId);
+        return n == null ? 0 : n;
+    }
+
+    /** 查 {@code status}，不带 {@code deleted} 条件（逻辑删除后仍要能读到它）。 */
+    private int statusRawOf(Long articleId) {
+        Integer status = jdbc().queryForObject(
+                "SELECT status FROM cms_article WHERE id = ?", Integer.class, articleId);
+        return status == null ? -1 : status;
+    }
+
+    /** 数某张关联表里属于该文章的、未逻辑删除的行数。 */
+    private int countOf(String table, Long articleId) {
+        Integer n = jdbc().queryForObject(
+                "SELECT COUNT(*) FROM " + table + " WHERE article_id = ? AND deleted = 0",
+                Integer.class, articleId);
+        return n == null ? 0 : n;
+    }
 
     /** 直接查库表拿权限码真值（与生产登录同一条 SQL）。 */
     private Set<String> permissionsOf(Long userId) {

@@ -109,10 +109,11 @@
 
 ## 五、E 组 · 分页边界（9 条，P1）
 
-> 全部打 **`GET /health/page-echo`**（S06 建的分页归一化探针）：它调 `PageQuery.normalize()`
-> 与 `checkSortField()` 这两个纯逻辑方法，**不碰数据库**，所以跑任何边界值都不改数据。
-> 响应里同时回"归一化前 / 归一化后"两组值，能证明是归一化起了作用而不是巧合。
-> 需要登录（`/health/**` 只有 `/ping` 在白名单）。
+> **执行通道（S20 起改为真实列表接口）**：`GET /api/v1/articles`。
+> S16 时期这条通道还不存在（列表接口是 S17 才做的），当时的做法是打 S06 建的分页归一化探针
+> `GET /health/page-echo` —— 它调 `PageQuery.normalize()` 与 `checkSortField()` 两个纯逻辑方法，
+> **不碰数据库**，跑任何边界值都不改数据，响应里同时回"归一化前 / 归一化后"两组值。
+> S20 按 §八 的交接把这 9 条**回填到真实列表接口重跑**（结果见下面的"回填重跑"小节）。
 
 | 用例编号 | 场景 | 请求 | 预期 code | 预期 data 字段 | 优先级 |
 |---|---|---|---|---|---|
@@ -125,6 +126,34 @@
 | E07 | 排序字段注入串 | `?sortField=create_time; DROP TABLE cms_article` | **400** | 「排序字段非法：…（只允许字母、数字、下划线…）」 | P0 |
 | E08 | 排序字段表达式 | `?sortField=1=1` | **400** | 同上 | P0 |
 | E09 | 合法排序字段 | `?sortField=create_time` | 200 | `acceptedSortField=create_time` | P1 |
+
+> "预期 data 字段"那一列是**探针上的字段名**（`normalizedPage` 等）。
+> 真实列表接口返回的是 `PageResult`，没有这些键，回填时必须把判据翻译过去 —— 见下表。
+
+### 5.1 回填重跑（S20，真实 `GET /api/v1/articles`）
+
+脚本 `target/s20_apifox_e.py`，结果 **PASS=24 / FAIL=0**（明细 `target/s20-apifox-e-result.tsv`）。
+
+| 用例 | 探针上的判据（S16） | 真实列表接口上的等价判据（S20 实测） | 结果 |
+|---|---|---|---|
+| E01 | `normalizedPage=1` | `data.current == 1` | ✅ 1 |
+| E02 | `normalizedPage=999` | `data.current == 999` 且 `records=[]`、`total` 仍是真实值 | ✅ 999 / 0 条 / total=54 |
+| E03 | `normalizedSize=10` | `data.size == 10` | ✅ 10 |
+| E04 | `normalizedSize=10` | `data.size == 10` | ✅ 10 |
+| E05 | `normalizedSize=100` | `data.size == 100` 且返回条数 ≤100 | ✅ 100 / 54 条 |
+| E06 | `normalizedSortOrder=desc` | 结果集按 `create_time` **非递增** | ✅ 首 22:20:14 → 末 22:19:57 |
+| E07 | **400** | **400** + 提示含「排序字段非法」 | ✅ 400 |
+| E08 | **400** | **400** | ✅ 400 |
+| E09 | `acceptedSortField=create_time` | 200 且按 `create_time` **非递减** | ✅ 首 2025-11-19 → 末 2026-09-27 |
+| 附 | — | 非白名单列（`sortField=content`）→ 400 且列出自选 | ✅ 提示「可选：create_time、update_time、publish_time、view_count、title、id」 |
+
+> ⚠️ **回填不是"把 URL 换掉"**：探针回的是 `PageQuery` 归一化后的**自述**，
+> 真实接口回的是 `PageResult`，两边**没有共同字段名**。这一层翻译必须显式做，
+> 否则会出现"用例写着通过、其实断言的是 `undefined == undefined`"的假通过。
+> ⚠️ `data.size` 是**回显的归一化后 size**（`PageResult` 由 `PageQuery` 造出来），
+> 所以 E03/E04/E05 的判据能直接搬 —— 这一点是实测确认的，不是推测。
+> ⚠️ E02 仍然**不做上界截断**：`current` 如实回 999、`records` 为空，但 `total` 是真实的，
+> 前端因此能区分"没有这一页"和"没有数据"。
 
 > E07 是这批用例里安全价值最高的一条：`sortField` 是要拼进 `ORDER BY` 的，
 > 项目用"MP `OrderItem` + 正则白名单（`^[A-Za-z_][A-Za-z0-9_]{0,63}$`）"两重防线挡住它，
@@ -164,12 +193,19 @@
    先断言 HTTP（401/403/400 这几种），再断言 `body.code`。
    **只断言 HTTP 200 会漏掉所有业务失败**（11002/11003/11011 全是 HTTP 200）。
 
-## 八、与"分页检索未实现"的关系（给 S17 的交接）
+## 八、与"分页检索未实现"的关系（S16 交接 → S17 实现 → **S20 收口**）
 
-手册 S16 要求"文章 15 个接口各 1 条正向用例"，实际只有 14 个 —— 缺的是
+手册 S16 要求"文章 15 个接口各 1 条正向用例"，当时实际只有 14 个 —— 缺的是
 `GET /api/v1/articles`（分页检索，契约 §1.3 第 8 行）。
 
-它对 S16 的影响：**3 条分页边界用例被迫改道**（E01~E09 打的是 `/health/page-echo` 而不是列表接口）。
+它对 S16 的影响：**9 条分页边界用例被迫改道**（E01~E09 打的是 `/health/page-echo` 而不是列表接口）。
 改道不算作弊 —— `page-echo` 调的正是列表接口会调的同一个 `PageQuery.normalize()`，
-但它**证明不了**列表接口自己的 WHERE/ORDER BY 拼接是否正确，这个空白要由 S17 补：
-S17 把分页检索做出来之后，E01~E09 应该**重跑一遍打卡列表接口**，那时才是真正闭环。
+但它**证明不了**列表接口自己的 WHERE/ORDER BY 拼接是否正确，这个空白要由 S17 补。
+
+**S17 已实现**该接口（`article:view`；`selectPage` + 收集外键批查 + 内存拼 VO；排序白名单
+`create_time/update_time/publish_time/view_count/title/id`），但 S17 只做了**等价验证**，
+没有回填这 9 条用例。
+
+**S20 收口**：见 §5.1 —— 9 条全部回填到真实列表接口重跑，**24 项断言全绿**。
+回填时暴露的一条真实经验是"**判据要翻译，不能只换 URL**"（探针回自述字段，
+列表接口回 `PageResult`，两边字段名没有交集）。至此 S16 留下的这条尾巴关闭。

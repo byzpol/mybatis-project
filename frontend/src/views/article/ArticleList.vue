@@ -412,7 +412,10 @@ function onSelectionChange(rows) {
 
 /** 每行的动作集合。抽成函数是因为模板里会调两次（一次渲染、一次判主色），别重复算 */
 function actionsOf(row) {
-  return getRowActions(row, (perm) => userStore.hasPermission(perm))
+  // ⚠️ 三个参数都要传：第三个是当前用户 id，用来过滤"后端会做水平越权校验"的动作
+  //   （编辑/提交初审/撤回/删除）。不传的话主编会在别人的草稿行上看到四个点了必被拒
+  //   的按钮（S20 回归 D-07）。口径与 ArticleServiceImpl 的 checkOwnership 调用点逐条对齐。
+  return getRowActions(row, (perm) => userStore.hasPermission(perm), userStore.userId)
 }
 
 function goCreate() {

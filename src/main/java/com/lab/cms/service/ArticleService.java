@@ -569,6 +569,57 @@ public interface ArticleService extends BaseService<CmsArticle> {
      */
     void archive(Long id, Long operatorId);
 
+    /**
+     * 删除文章（<b>逻辑删除</b>）：{@code DRAFT / REJECTED → 已删除}。
+     *
+     * <p><b>这不是状态迁移</b>，所以它不在 {@code ArticleStateMachine} 里 ——
+     * 状态机管的是 {@code cms_article.status} 的流转，删除改的是
+     * {@code cms_article.deleted}（{@code @TableLogic}）。两者互不影响：
+     * 被逻辑删除的文章 {@code status} 原样保留，只是任何查询都查不到它了。
+     * 这也是 {@link #deleteArticle} 与
+     * {@link com.lab.cms.common.ArticleAction} 不产生任何关系的原因。
+     *
+     * <h3>⚠️ 为什么只有草稿与已驳回可删（11013）</h3>
+     * <p>其余状态都"已经产生过对外后果"，删掉会让追溯链断掉：
+     * <ul>
+     *   <li>{@code PENDING_EDITOR / PENDING_CHIEF}：正在审核中，删除等于把稿子从审核者眼皮下抽走；</li>
+     *   <li>{@code APPROVED / SCHEDULED}：已批准甚至已排期，"撤回排期"应当走发布侧的动作，不是删除；</li>
+     *   <li>{@code PUBLISHED / WITHDRAWN / OFFLINE}：<b>上线过</b>。这类内容即使不要了，
+     *       正确的终态是 {@link #archive(Long, Long)}（归档，只读留档），
+     *       而不是让它从历史里消失 —— 责任事故的复盘要靠它。</li>
+     * </ul>
+     * <p>被拒时抛 {@code ARTICLE_DRAFT_ONLY(11013)}。
+     * ⚠️ 该错误码此前在代码里<b>零引用</b>（S18 记录过这一条），本方法
+     * 是它唯一的产生点。手册把"仅草稿可删"写成"仅草稿态"，本项目口径是
+     * <b>草稿与已驳回</b> —— 与 {@link #updateDraft} 的 {@code requireEditable}
+     * 完全一致（已驳回同样可以编辑，那自然也应当可以删）。
+     *
+     * <h3>⚠️ 要校验归属</h3>
+     * <p>与"改草稿"（{@link #updateDraft}）同类：删的是作者自己的稿子。
+     * 权限码 {@code article:delete} 连 {@code ROLE_AUTHOR(7)} 都有，
+     * 不做归属校验的话任何作者都能删光别人的草稿。命中抛 {@code ARTICLE_NOT_OWNER(11003)}。
+     *
+     * <h3>⚠️ 为什么不级联删除版本与审核流水</h3>
+     * <p>本项目的口径是<b>逻辑删除不级联</b>（S18 已定，见 {@code docs/重构记录.md}）：
+     * 被删文章的快照与流水原样留在库里。理由有二：
+     * <ol>
+     *   <li>只可能被删的是草稿/已驳回 —— 这两种状态下的流水最多是"提交过又被驳回"，
+     *       而版本快照是内容演进过程，本身就是查不到入口（详情返回 11001 之后，
+     *       {@code /{id}/versions} 也拿不到东西）的只读数据，留着不构成越权面；</li>
+     *   <li>级联逻辑删除需要一个"跨三张表的批量 UPDATE"事务，而收益只是
+     *       "库里少几个查不到的行"。为一个看不见的收益引入新的事务边界，不成比例。</li>
+     * </ol>
+     *
+     * <h3>不写审核流水</h3>
+     * <p>同 {@link #publishNow} / {@link #withdraw}：{@code cms_article_audit_log}
+     * 的 {@code result} 只允许 1 通过 / 2 驳回，删除填不进去。留痕走
+     * {@code @OperLog} → {@code sys_oper_log}。
+     *
+     * @param id         文章 ID
+     * @param operatorId 操作人 ID（必须是文章作者本人）
+     */
+    void deleteArticle(Long id, Long operatorId);
+
     // ==================== 九、版本快照与回滚（S15） ====================
 
     /**

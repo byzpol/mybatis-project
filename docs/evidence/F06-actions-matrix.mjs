@@ -217,6 +217,108 @@ ok('offline/archive/remove 都带 danger', !!ACTION_META.offline.danger && !!ACT
 ok('withdraw 不带 danger（可恢复）', !ACTION_META.withdraw.danger)
 
 // ---------------------------------------------------------------------------
+// 7b) 归属维度（S20 新增 · D-07）
+// ---------------------------------------------------------------------------
+// 背景：F06 当时刻意不判归属，实测（S20 回归）导致主编/编辑/管理员在**别人**的
+//       草稿行上看到「编辑 / 提交初审 / 删除」，在别人的已发布行上看到「撤回」，
+//       点下去一律被后端拒成 11003 —— 死按钮。
+//
+// ⚠️ 这里的"哪些动作要判归属"是**手写死的**，依据是 ArticleServiceImpl 的
+//    checkOwnership 调用点（逐条读过源码，不是看注释）：
+//      updateDraft(406) / submitForAudit(443) / changeStatusByAction(1131,
+//      仅 withdraw 传 true) / rollbackVersion(1255) / deleteArticle(S20 新增)
+//    → 列表页在这四类动作上加 ownerOnly：edit / submit / withdraw / remove
+//    ❌ 不判归属：audit（只看权限码+禁自审）、publishNow / publishSchedule /
+//       republish（发布不校验归属）、offline / archive（运营职能，必须能管别人的稿）
+// ---------------------------------------------------------------------------
+const MINE = 1 // 当前登录用户 id
+const OTHER = 5 // 另一个人的 id
+
+/** 归属为"本人"的那一行 */
+const ownRow = (status) => ({ status, authorId: MINE })
+/** 归属为"他人"的那一行 */
+const othersRow = (status) => ({ status, authorId: OTHER })
+
+const keysOwn = (status, role) => getRowActions(ownRow(status), has(role), MINE).map((a) => a.key)
+const keysOthers = (status, role) => getRowActions(othersRow(status), has(role), MINE).map((a) => a.key)
+
+// (a) ownerOnly 白名单必须恰好是那四个 —— 多了会藏掉运营该有的按钮，少了会留死按钮
+const OWNER_ONLY = Object.keys(ACTION_META).filter((k) => ACTION_META[k].ownerOnly).sort()
+ok('ownerOnly 白名单 = edit,remove,submit,withdraw',
+  OWNER_ONLY.join(',') === 'edit,remove,submit,withdraw', OWNER_ONLY.join(','))
+ok('offline 不加 ownerOnly（运营要能管别人的稿）', !ACTION_META.offline.ownerOnly)
+ok('archive 不加 ownerOnly（运营要能管别人的稿）', !ACTION_META.archive.ownerOnly)
+ok('audit 不加 ownerOnly（编辑要能审别人的稿）', !ACTION_META.audit.ownerOnly)
+ok('publishNow 不加 ownerOnly（发布不校验归属）', !ACTION_META.publishNow.ownerOnly)
+ok('republish 不加 ownerOnly（复用 publishNow）', !ACTION_META.republish.ownerOnly)
+
+// (b) 自己的稿子：与不带归属维度时完全一致（40 格矩阵不受影响）
+let sameAsBefore = 0
+for (let s = 0; s <= 9; s++) {
+  for (const role of ['作者', '编辑', '主编', '管理员']) {
+    if (JSON.stringify(keysOwn(s, role)) === JSON.stringify(EXPECT[s][role])) sameAsBefore++
+  }
+}
+ok('自己的稿子：40 格与权限矩阵完全一致', sameAsBefore === 40, sameAsBefore)
+
+// (c) 别人的稿子：ownerOnly 的四个动作全部消失
+let stripped = 0
+for (let s = 0; s <= 9; s++) {
+  for (const role of ['作者', '编辑', '主编', '管理员']) {
+    const got = keysOthers(s, role)
+    const exp = EXPECT[s][role].filter((k) => !ACTION_META[k].ownerOnly)
+    if (JSON.stringify(got) === JSON.stringify(exp)) stripped++
+  }
+}
+ok('别人的稿子：40 格都恰好少了 ownerOnly 的动作', stripped === 40, stripped)
+
+// (d) 逐条典型场景（读起来最直观的四个）
+ok('主编看别人的草稿(0)：三个动作全被收起 → []',
+  keysOthers(0, '主编').join(',') === '', keysOthers(0, '主编').join(','))
+ok('主编看别人的已发布(5)：只剩 查看+下架（撤回被收起）',
+  keysOthers(5, '主编').join(',') === 'view,offline', keysOthers(5, '主编').join(','))
+ok('作者看别人的草稿(0)：→ []',
+  keysOthers(0, '作者').join(',') === '', keysOthers(0, '作者').join(','))
+ok('管理员看别人的已撤回(7)：重新发布与归档都还在',
+  keysOthers(7, '管理员').join(',') === 'view,republish,archive', keysOthers(7, '管理员').join(','))
+
+// (e) 关键：**自己的稿子一行都不能少**（归属过滤不能误伤）
+ok('作者看自己的草稿(0)：编辑/提交/删除都在',
+  keysOwn(0, '作者').join(',') === 'edit,submit,remove', keysOwn(0, '作者').join(','))
+ok('作者看自己的已发布(5)：撤回还在',
+  keysOwn(5, '作者').join(',') === 'view,withdraw', keysOwn(5, '作者').join(','))
+
+// (f) 拿不到当前用户 id → 退化为不过滤（不能因为异步时序把操作列清空）
+ok('currentUserId 不传 → 不过滤（主编看到草稿的三个按钮）',
+  getRowActions({ status: 0, authorId: OTHER }, has('主编')).map((a) => a.key).join(',') === 'edit,submit,remove',
+  getRowActions({ status: 0, authorId: OTHER }, has('主编')).map((a) => a.key).join(','))
+ok('currentUserId=null → 不过滤',
+  getRowActions({ status: 0, authorId: OTHER }, has('主编'), null).map((a) => a.key).join(',') === 'edit,submit,remove')
+ok('currentUserId=undefined → 不过滤',
+  getRowActions({ status: 0, authorId: OTHER }, has('主编'), undefined).map((a) => a.key).join(',') === 'edit,submit,remove')
+ok('currentUserId="" → 不过滤（空串视为未取到）',
+  getRowActions({ status: 0, authorId: OTHER }, has('主编'), '').map((a) => a.key).join(',') === 'edit,submit,remove')
+
+// (g) 类型容错：id 是字符串也必须比得出来（后端 JSON 里 BIGINT 可能是字符串）
+ok('authorId 与 currentUserId 类型不同（"1" vs 1）也认作本人',
+  getRowActions({ status: 0, authorId: '1' }, has('作者'), 1).map((a) => a.key).join(',') === 'edit,submit,remove')
+ok('authorId 与 currentUserId 类型不同（1 vs "1"）也认作本人',
+  getRowActions({ status: 0, authorId: 1 }, has('作者'), '1').map((a) => a.key).join(',') === 'edit,submit,remove')
+
+// (h) authorId 缺失：不能判定归属 → 按"不是本人"处理（收紧而不是放宽）
+ok('authorId 缺失时 ownerOnly 动作不显示（收紧）',
+  getRowActions({ status: 0 }, has('主编'), MINE).map((a) => a.key).join(',') === '',
+  getRowActions({ status: 0 }, has('主编'), MINE).map((a) => a.key).join(','))
+
+// (i) 归属过滤不能改变"顺序约定"与"主色唯一"
+for (let s = 0; s <= 9; s++) {
+  const arr = getRowActions(ownRow(s), () => true, MINE)
+  ok(`自己的稿子 状态${s} 恰好一个主色动作`,
+    arr.filter((a) => isPrimaryAction(s, a.key)).length === 1,
+    arr.map((a) => `${a.key}${isPrimaryAction(s, a.key) ? '*' : ''}`).join(','))
+}
+
+// ---------------------------------------------------------------------------
 console.log('='.repeat(72))
 console.log(`F06 操作列矩阵：通过 ${pass} 项，失败 ${fails.length} 项`)
 console.log('='.repeat(72))

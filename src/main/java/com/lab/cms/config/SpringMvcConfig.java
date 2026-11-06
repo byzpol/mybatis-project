@@ -18,6 +18,7 @@ import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
+import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.util.List;
@@ -246,6 +247,76 @@ public class SpringMvcConfig implements WebMvcConfigurer {
         registry.addResourceHandler("/assets/**")
                 .addResourceLocations("/assets/")
                 .setCachePeriod(60 * 60 * 24 * 30);
+    }
+
+    /**
+     * 【S20 新增 · 主干加方法，未改任何既有签名】前端 history 模式的子路由 fallback。
+     *
+     * <h3>不加这个会怎样（S20 真机回归实测发现的真实缺陷 D-12）</h3>
+     * <p>{@code GET /cms-mis/articles/list} 直接返回 <b>404</b>（响应体是统一 JSON
+     * {@code {"code":404,...}}，不是网页）。同理 {@code /cms-mis/login} 也打不开。
+     *
+     * <p>为什么 SPA 内部跳转却正常：那是在**浏览器里**由 vue-router 改地址栏 + 换组件，
+     * 根本没向后端发请求。一旦用户按 F5、把网址发给别人、或在地址栏直接输入，
+     * 请求就会真的打到 Tomcat —— 而 {@code /articles/list} 在后端没有任何 handler，
+     * 于是落到 S08 配好的统一 404。
+     *
+     * <p>⚠️ {@code router/index.js} 用的是 {@code createWebHistory}（不是 hash 模式），
+     * 这是"URL 好看"的代价 —— 必须由服务端配合做 fallback，否则深链一律不可用。
+     * 这个风险 F01 的文档里就登记过并给了方案，但一直没落到代码上，
+     * 直到 S20 走"前端完整用户路径"时才暴露：<b>登录页本身就是个深链</b>。
+     *
+     * <h3>为什么不用通配 {@code /**} 一把兜住</h3>
+     * <p>两个方案都试过、也权衡过：
+     * <ul>
+     *   <li>{@code addResourceHandler("/**")} + 自定义 PathResourceResolver
+     *       （文件不存在就回 index.html）：<b>会冲掉 S08 定好的"未知接口返回统一 Result 404"</b>
+     *       —— 因为 {@code /**} 匹配上之后 SpringMVC 认为"handler 找到了"，
+     *       {@code throwExceptionIfNoHandlerFound} 不再触发，
+     *       {@code /api/v1/不存在的接口} 会拿到一坨 index.html 而不是 JSON。</li>
+     *   <li>这里采用<b>白名单式显式登记</b>：只把 vue-router 里真实存在的那几条
+     *       前端路由登记成 forward。{@code /api/**}、{@code /assets/**}、
+     *       {@code /index.html} 都不在白名单里，行为完全不变。</li>
+     * </ul>
+     *
+     * <h3>⚠️ 维护约束：前端加了新的一级路由，这里必须同步加一行</h3>
+     * <p>否则新页面又是"SPA 里点得进去、刷新就 404"。判断标准很简单：
+     * <b>看 {@code frontend/src/router/index.js} 的 {@code routes} 里有哪几个一级 path</b>，
+     * 逐条对照下面的清单。目前覆盖：
+     * <pre>
+     *   /login  /403  /profile
+     *   /articles/**   ← list / mine / audit / create / edit/:id / detail/:id
+     *   /categories  /tags  /users  /roles  /logs/**  /reports
+     * </pre>
+     * <p>⚠️ 顺序上不必担心抢接口：{@code ViewControllerRegistry} 注册的映射
+     * 优先级低于 {@code RequestMappingHandlerMapping} 里那些 {@code @GetMapping}，
+     * 且前缀本身也不重叠（接口都在 {@code /api/v1/**} 下）。
+     *
+     * <h3>为什么 forward 到 {@code /index.html} 而不是重定向</h3>
+     * <p>forward 不改变浏览器地址栏 —— 用户刷新后仍在 {@code /articles/list}，
+     * 前端 router 才能据此渲染出正确的页面。用 redirect 的话地址栏会被改写成
+     * {@code /index.html}，刷新一次就"跳回首页"，深链彻底失效。
+     */
+    @Override
+    public void addViewControllers(ViewControllerRegistry registry) {
+        String entry = "forward:/index.html";
+
+        // 登录页：它本身就是最深、最需要能直接打开的深链（别人发个链接给你就能登）
+        registry.addViewController("/login").setViewName(entry);
+        registry.addViewController("/403").setViewName(entry);
+        registry.addViewController("/profile").setViewName(entry);
+
+        // 文章域：/articles/list、/articles/mine、/articles/audit、
+        // /articles/create、/articles/edit/{id}、/articles/detail/{id}
+        registry.addViewController("/articles/**").setViewName(entry);
+
+        // 其余一级菜单（成员B/C/D 的页面当前还是占位组件，但路由真实存在，同样要能刷新）
+        registry.addViewController("/categories").setViewName(entry);
+        registry.addViewController("/tags").setViewName(entry);
+        registry.addViewController("/users").setViewName(entry);
+        registry.addViewController("/roles").setViewName(entry);
+        registry.addViewController("/logs/**").setViewName(entry);
+        registry.addViewController("/reports").setViewName(entry);
     }
 
     /**

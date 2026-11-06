@@ -7,11 +7,10 @@ import com.lab.cms.common.exception.BusinessException;
 import com.lab.cms.common.exception.ErrorCode;
 import com.lab.cms.config.CurrentUserArgumentResolver;
 import com.lab.cms.dto.LoginDTO;
-import com.lab.cms.entity.SysLoginLog;
 import com.lab.cms.entity.SysUser;
-import com.lab.cms.mapper.SysLoginLogMapper;
 import com.lab.cms.mapper.SysUserMapper;
 import com.lab.cms.service.AuthService;
+import com.lab.cms.service.LoginLogService;
 import com.lab.cms.vo.LoginVO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,8 +65,17 @@ public class AuthServiceImpl implements AuthService {
     @Autowired
     private SysUserMapper sysUserMapper;
 
+    /**
+     * 登录日志写入器。
+     *
+     * <p>⚠️ 必须是独立 Bean（不能在本类里自己写 insert）：本方法所在的
+     * {@link #login} 有 {@code @Transactional}，失败路径"写完日志就抛异常"
+     * 会把日志一起回滚掉。{@link LoginLogService} 标了 {@code REQUIRES_NEW}，
+     * 日志在外层事务之外单独提交，异常回滚不到它。
+     * <p>详见 {@link LoginLogService} 的类注释（S20 真机回归抓到的缺陷）。
+     */
     @Autowired
-    private SysLoginLogMapper sysLoginLogMapper;
+    private LoginLogService loginLogService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -83,7 +91,8 @@ public class AuthServiceImpl implements AuthService {
         // ⚠️ 与"密码错误"用同一个错误码（防用户名枚举），但日志里可以写清楚
         if (user == null) {
             log.warn("登录失败：用户不存在 | username={} | ip={}", username, clientIp);
-            saveLoginLog(username, null, clientIp, userAgent, 0, "用户名或密码错误");
+            loginLogService.record(username, null, clientIp, userAgent,
+                    LoginLogService.STATUS_FAIL, "用户名或密码错误");
             throw new BusinessException(ErrorCode.PASSWORD_ERROR);
         }
 
@@ -91,7 +100,8 @@ public class AuthServiceImpl implements AuthService {
         if (user.getStatus() == null || user.getStatus() != 1) {
             log.warn("登录失败：账号被禁用 | username={} | userId={} | ip={}",
                     username, user.getId(), clientIp);
-            saveLoginLog(username, user.getId(), clientIp, userAgent, 0, "账号已被禁用");
+            loginLogService.record(username, user.getId(), clientIp, userAgent,
+                    LoginLogService.STATUS_FAIL, "账号已被禁用");
             throw new BusinessException(ErrorCode.USER_DISABLED);
         }
 
@@ -101,7 +111,8 @@ public class AuthServiceImpl implements AuthService {
         if (!passwordEncoder.matches(dto.getPassword(), user.getPassword())) {
             log.warn("登录失败：密码错误 | username={} | userId={} | ip={}",
                     username, user.getId(), clientIp);
-            saveLoginLog(username, user.getId(), clientIp, userAgent, 0, "用户名或密码错误");
+            loginLogService.record(username, user.getId(), clientIp, userAgent,
+                    LoginLogService.STATUS_FAIL, "用户名或密码错误");
             throw new BusinessException(ErrorCode.PASSWORD_ERROR);
         }
 
@@ -146,7 +157,8 @@ public class AuthServiceImpl implements AuthService {
                         .set("last_login_time", LocalDateTime.now()));
 
         // ---- 9. 写成功日志 ----
-        saveLoginLog(username, user.getId(), clientIp, userAgent, 1, "登录成功");
+        loginLogService.record(username, user.getId(), clientIp, userAgent,
+                LoginLogService.STATUS_SUCCESS, "登录成功");
 
         log.info("登录成功 | username={} | userId={} | roles={} | 权限数={} | ip={}",
                 username, user.getId(), roles,
@@ -167,9 +179,10 @@ public class AuthServiceImpl implements AuthService {
         if (attr instanceof LoginUser) {
             LoginUser user = (LoginUser) attr;
             log.info("登出 | username={} | userId={}", user.getUsername(), user.getUserId());
-            saveLoginLog(user.getUsername(), user.getUserId(),
+            loginLogService.record(user.getUsername(), user.getUserId(),
                     CurrentUserArgumentResolver.getClientIp(),
-                    request.getHeader("User-Agent"), 1, "登出成功");
+                    request.getHeader("User-Agent"),
+                    LoginLogService.STATUS_SUCCESS, "登出成功");
         }
         // ⚠️ 必须 invalidate（见类注释要点 2）
         session.invalidate();
@@ -200,32 +213,11 @@ public class AuthServiceImpl implements AuthService {
         return new LinkedHashSet<>(Arrays.asList(commaSeparated.split(",")));
     }
 
-    /**
-     * 写登录日志。
-     *
-     * <p>⚠️ 单独 try-catch：写日志失败绝不影响登录流程本身。
-     * 用户在登录时因为日志表问题看到 500，是极差的体验。
-     *
-     * <p>⚠️ 本方法**不接收密码参数** —— 从类型上就杜绝了密码流入日志的可能。
-     */
-    private void saveLoginLog(String username, Long userId, String ip,
-                              String userAgent, int status, String message) {
-        try {
-            SysLoginLog entity = new SysLoginLog();
-            entity.setUsername(truncate(username, 50));
-            entity.setUserId(userId);
-            entity.setIp(truncate(ip, 50));
-            entity.setUserAgent(truncate(userAgent, 500));
-            entity.setLoginStatus(status);
-            entity.setMessage(truncate(message, 255));
-            entity.setLoginTime(LocalDateTime.now());
-            sysLoginLogMapper.insert(entity);
-        } catch (Exception e) {
-            // ⚠️ 传异常对象而不是只拼 e.getMessage()：Spring 的 DataAccessException
-            //    翻译后 getMessage() 可能为空，只有 cause 里才有真正原因（见 WebLogAspect 同类处理）
-            log.warn("登录日志写库失败（不影响登录流程） | username={}", username, e);
-        }
-    }
+    // ⚠️ 这里原本还有一个私有的 saveLoginLog(...)，S20 真机回归后已移除。
+    //    它和 login() 处在同一个事务里，而失败路径是"先写日志、后抛业务异常"，
+    //    异常一抛整段事务回滚，刚插进去的失败日志也没了 —— 实测 sys_login_log
+    //    总行数 121 → 121 完全不变，库里只剩成功记录。
+    //    现统一改走 LoginLogService（独立 Bean + REQUIRES_NEW），详见该接口的类注释。
 
     /**
      * 组装 LoginVO。
@@ -241,13 +233,5 @@ public class AuthServiceImpl implements AuthService {
         vo.setSuperAdmin(user.getSuperAdmin());
         vo.setLoginTime(loginTime);
         return vo;
-    }
-
-    /** 字符串截断，防字段超长导致日志写入失败 */
-    private String truncate(String value, int maxLength) {
-        if (value == null) {
-            return null;
-        }
-        return value.length() <= maxLength ? value : value.substring(0, maxLength);
     }
 }

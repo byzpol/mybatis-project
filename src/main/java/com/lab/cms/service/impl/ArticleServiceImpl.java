@@ -1090,6 +1090,90 @@ public class ArticleServiceImpl extends BaseServiceImpl<CmsArticleMapper, CmsArt
     }
 
     /**
+     * 删除文章（逻辑删除）。实现说明见 {@link ArticleService#deleteArticle}。
+     *
+     * <h3>⚠️ 为什么不用 MP 的 {@code removeById}</h3>
+     * <p>{@code removeById} 走的是 MP 的逻辑删除，生成的 SQL 形如
+     * {@code UPDATE cms_article SET deleted=1 WHERE id=? AND deleted=0} ——
+     * <b>SET 子句里只有 deleted 一列</b>，{@code update_by / update_time} 不会被
+     * {@code AuditMetaObjectHandler} 填（逻辑删除是 MP 内部的固定 SQL，不经过实体填充）。
+     * 于是删完之后只看库表是<b>看不出"是谁删的"</b>的，只能去 {@code sys_oper_log} 里翻。
+     * <p>本项目对"审计四字段"的口径是硬指标（见 S18 自检 4-2），所以这里改成
+     * 显式列列的 {@code LambdaUpdateWrapper} ——
+     * 与 S13「立即发布清空 {@code schedule_time}」、S14「排期把 {@code publish_time}
+     * 写回 NULL」用的是同一套写法（唯一能显式控制 SET 列的方式）。
+     *
+     * <h3>⚠️ 为什么 WHERE 里要显式再带一个 {@code deleted = 0}</h3>
+     * <p>MP 会给带 {@code @TableLogic} 的实体的 update 自动追加 {@code AND deleted = 0}，
+     * 所以这一句在正常情况下是<b>冗余</b>的。留着它有两点作用：
+     * ① 万一将来有人把 {@code @TableLogic} 从 {@code CmsArticle} 上摘掉，
+     * 这里仍然拦得住"重复删除会返回 1 行受影响"的假成功；
+     * ② 它让"删除必须是幂等安全的一次性动作"这件事<b>写在了读代码的人眼前</b>，
+     * 而不是藏在框架行为里。受影响行数不是 1 就说明这一次没删成，直接报错。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteArticle(Long id, Long operatorId) {
+        CmsArticle article = requireArticle(id);
+        // 归属校验放在状态校验之前 —— 与 updateDraft / submitForAudit / withdraw 同序。
+        // 顺序定了就不改：对"别人的已归档文章"调用本接口，拿到的是 11003（越权）
+        // 而不是 11011（只读），这是全项目一致的一条既定行为（S20 回归已固化）。
+        checkOwnership(article, operatorId);
+        requireDeletable(article);
+
+        LambdaUpdateWrapper<CmsArticle> wrapper = new LambdaUpdateWrapper<CmsArticle>()
+                .eq(CmsArticle::getId, id)
+                .eq(CmsArticle::getDeleted, 0)
+                .set(CmsArticle::getDeleted, 1)
+                .set(CmsArticle::getUpdateBy, operatorId)
+                .set(CmsArticle::getUpdateTime, LocalDateTime.now());
+
+        int rows = baseMapper.update(null, wrapper);
+        if (rows == 0) {
+            // 并发场景：两个请求同时删同一篇，后到的那个在这里返回 0。
+            // 不静默返回成功 —— 前端会在确认框里点完就看到"成功"，但库里其实
+            // 是别人删的，责任链会断。这里明确抛业务异常。
+            log.warn("文章逻辑删除影响 0 行（可能已被并发删除）| articleId={} | 操作人={}",
+                    id, operatorId);
+            throw new BusinessException(ErrorCode.ARTICLE_DRAFT_ONLY, "文章不存在或已被删除");
+        }
+
+        log.info("文章已逻辑删除 | articleId={} | 操作人={} | 原状态={}",
+                id, operatorId, article.getStatus());
+    }
+
+    /**
+     * 校验文章当前状态允许删除（仅 {@code DRAFT} 与 {@code REJECTED}）。
+     *
+     * <p>与 {@link #requireEditable} 是<b>两份判断、两个码</b>，不是重复劳动：
+     * 两者的"拒绝理由"对用户来说是两件事 ——
+     * "不能改"（11002，去走别的入口）与"不能删"（11013，这篇稿子已经不是私有的了）。
+     * 合并成一个方法会逼出一个"调用方传参数决定抛哪个码"的签名，反而更难读。
+     *
+     * <p>⚠️ 已 {@code ARCHIVED} 单独抛 11011 而不是 11013：
+     * 归档是终态，"这篇不能删"的准确说法是"它已经归档了，永久留档"，
+     * 与"审核中/已发布所以不能删"是不同性质的两个结论。
+     */
+    private void requireDeletable(CmsArticle article) {
+        ArticleStatus status = ArticleStatus.ofNullable(article.getStatus());
+        if (status == null) {
+            log.error("文章状态码异常（脏数据）| articleId={} | status={}",
+                    article.getId(), article.getStatus());
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,
+                    "文章状态异常，请联系管理员（articleId=" + article.getId() + "）");
+        }
+        if (status.isFinal()) {
+            throw new BusinessException(ErrorCode.ARTICLE_ARCHIVED_READONLY,
+                    "已归档的文章不可删除，归档件必须永久留档");
+        }
+        if (!status.isEditable()) {
+            throw new BusinessException(ErrorCode.ARTICLE_DRAFT_ONLY,
+                    String.format("文章当前状态为「%s」，只有草稿或已驳回的文章可以删除",
+                            status.getDescription()));
+        }
+    }
+
+    /**
      * 撤回 / 下架 / 归档的<b>公共骨架</b>（三个动作只差"动作枚举"与"是否校验归属"）。
      *
      * <h3>⚠️ 为什么必须抽出来，而不是复制三遍</h3>

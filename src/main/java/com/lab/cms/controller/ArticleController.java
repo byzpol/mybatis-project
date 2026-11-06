@@ -20,6 +20,7 @@ import com.lab.cms.vo.CmsArticleDetailVO;
 import com.lab.cms.vo.CmsArticleVO;
 import com.lab.cms.vo.CmsArticleVersionVO;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -35,7 +36,7 @@ import java.util.List;
  * 文章接口（S09 建立"草稿与投稿"四个，S10 追加"审核"一个，
  * S11 追加"详情/流水"两个，S13 追加"立即发布/排期发布"两个，
  * S14 追加"撤回/下架/归档"三个，S15 追加"版本列表/版本回滚"两个，
- * S17 追加"分页检索"一个）。
+ * S17 追加"分页检索"一个，S20 补齐"删除"一个）。<b>共 16 个端点</b>。
  *
  * <h3>本类只做四件事</h3>
  * <p>收参 → 交给 {@code @Valid} 校验 → 调 Service → 封装 {@code Result}。
@@ -54,26 +55,20 @@ import java.util.List;
  * 这里再取一次是<b>第二道防线</b>：拦截器放行的白名单将来若被改动，
  * 或者请求经过某些转发路径绕开了拦截器，这一层仍然能兜住。
  *
- * <p>⚠️ 为什么用 {@code BaseController.currentUserId()} 而不是直接读
- * {@code HttpServletRequest#getSession()}：项目里"当前用户是谁"只有一种取法
- * （{@code LoginUser} + {@code SessionConstant}），
+ * <p>⚠️ 用 {@code BaseController.currentUserId()} 而不是直接读 {@code Request#getSession()}：
+ * "当前用户是谁"在项目里只有一种取法（{@code LoginUser} + {@code SessionConstant}），
  * 自己从 Request 里扒会造出第二套口径 —— 将来 Session 键名一改就漏掉一处。
  *
  * <h3>权限码为什么与 {@code docs/接口契约.md} §1.3 不完全一致</h3>
- * <p>契约表里"编辑草稿"写的是 {@code article:edit}、"下架"写的是 {@code article:offline}。
- * 但库表 {@code sys_permission} 里<b>根本没有这两个码</b>
- * （实际只有 {@code article:view/create/update/submit/audit/publish/withdraw/manage/delete}）。
- * 若照契约写，{@code PermissionAspect} 会认为"谁都缺这个权限"，
- * 结果是所有角色（包括 admin）都被 403 拦死。
- * <p>项目口径是"<b>库表 > 契约</b>"（契约是设计草稿，库表是运行时真相），
- * 因此这里用的是 {@code article:update}。契约 §1.3 的 4 处偏差已登记待修。
+ * <p>契约里"编辑草稿"写 {@code article:edit}、"下架"写 {@code article:offline}，
+ * 但库表 {@code sys_permission} 里<b>根本没有这两个码</b>。照契约写会让
+ * {@code PermissionAspect} 认为"谁都缺这个权限"，所有角色（含 admin）都被 403。
+ * <p>项目口径是"<b>库表 &gt; 契约</b>"，因此用 {@code article:update / article:manage}。
  *
  * <h3>⚠️ 关于 {@code @OperLog} 的 {@code saveParams}</h3>
- * <p>新建/修改草稿这两个接口显式写了 {@code saveParams = false}，
- * 原因见 {@code OperLog#saveParams()} 的注释：参数里含文章正文（LONGTEXT），
- * 原样写进 {@code sys_oper_log.request_param} 会把日志表撑爆。
- * 提交类接口参数只有一个 id（或一个短数组），保持默认的"记录参数"即可 ——
- * 排查"谁在什么时候提交了哪篇"时，参数恰恰是最有用的信息。
+ * <p>新建/修改草稿显式写了 {@code saveParams = false}：参数里含 LONGTEXT 正文，
+ * 原样入库会把 {@code sys_oper_log.request_param} 撑爆（见 {@code OperLog#saveParams()}）。
+ * 其余接口参数都很短，保持默认记录 —— 排查"谁在什么时候提交了哪篇"时参数最有用。
  */
 @RestController
 @RequestMapping("/api/v1/articles")
@@ -419,6 +414,31 @@ public class ArticleController extends BaseController {
     public Result<Void> archive(@PathVariable("id") Long id) {
         articleService.archive(id, requireCurrentUserId());
         return Result.<Void>success("文章已归档", null);
+    }
+
+    /**
+     * 删除文章（<b>逻辑删除</b>，S20 补齐）。{@code DELETE /api/v1/articles/{id}}，
+     * 权限 {@code article:delete}。
+     *
+     * <p>⚠️ 本接口是契约 §1.3 第 5 行从 S05 起就列着、手册 F06 也要求过的端点，
+     * 但后端一直没写 —— 前端列表页那颗「删除」按钮点下去必然落到统一 JSON 404
+     * （S20 回归实测到，登记为 D-13）。{@code ARTICLE_DRAFT_ONLY(11013)}
+     * 此前全仓零引用，本方法是它唯一的产生点。
+     * S18 曾记"本轮不实现，因为行为变更必须有独立用例与回归"，
+     * S20 正是带独立用例的回归步，故在此补齐并当轮回归。
+     *
+     * <p>⚠️ 权限码就是 {@code article:delete}（文章域此前唯一"有码无接口"的一个），
+     * 与契约一致，不需要像"编辑/下架"那样改写；<b>要校验归属</b>（11003）。
+     * 不加 {@code saveParams = false}：本接口没有请求体，不存在撑爆日志表的风险。
+     * 完整的取舍说明（为什么不用 MP 的 {@code removeById}、为什么不级联删除版本与流水）
+     * 见 {@code ArticleService#deleteArticle}。
+     */
+    @DeleteMapping("/{id}")
+    @RequirePermission("article:delete")
+    @OperLog(module = "文章管理", type = OperType.DELETE, desc = "删除文章")
+    public Result<Void> deleteArticle(@PathVariable("id") Long id) {
+        articleService.deleteArticle(id, requireCurrentUserId());
+        return Result.<Void>success("文章已删除", null);
     }
 
     /**

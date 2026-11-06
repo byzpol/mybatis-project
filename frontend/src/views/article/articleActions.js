@@ -66,13 +66,45 @@
  *   · article:publish  → 主编 / 管理员（**编辑没有**）→ 编辑看不到立即发布/排期发布
  *   · article:manage   → 主编 / 管理员 → 下架/归档只有他们能做
  *
- * ⚠️ 前端只按**权限码**判断显示与否。至于"这篇是不是我写的"这类**归属**判断（水平越权），
- *    属于后端 S12 的 `checkOwnership` 职责，前端不做也不该做——
- *    前端做了也拦不住人直接调接口。所以这里不引入"是否本人"这个维度。
- *
  * ⚠️ 顺带记一笔：`docs/接口契约.md` §1.3 用的 `article:list / article:edit /
  *    article:offline / article:archive` 这四个码**库里一个都没有**。
  *    本文件一律跟随库表（理由见 docs/F03-后台布局与主题实测记录.md「权限码口径不一致」）。
+ *
+ * ---------------------------------------------------------------------------
+ * 3) ⚠️ 归属维度：S20 起**加进来了**（此前 F06 刻意不加，已纠正）
+ * ---------------------------------------------------------------------------
+ * F06 当时的结论是"前端只按权限码判断，归属（水平越权）归后端 checkOwnership"，
+ * 理由是"前端做了也拦不住人直接调接口"。**这句话本身没错，但它回答的是错误的问题**：
+ *   · 后端 `checkOwnership` 是**安全边界**，必须留着 —— 这一点没有变；
+ *   · 前端过滤按钮是**可用性**，问的是"要不要给用户一个点下去必然失败的按钮"。
+ * 实测（S20 回归 D-07）：主编 / 编辑 / 管理员打开文章列表，
+ * 在**别人**的草稿行上会看到「编辑」「提交初审」「撤回」「删除」四个按钮，
+ * 点下去一律被后端拒成 `11003 只能操作自己创建的文章` —— 四个死按钮。
+ * 所以现在**两个维度都要**：权限码决定"这个角色能不能做这类动作"，
+ * 归属决定"这一行是不是他的"。
+ *
+ * ⚠️ 归属判断只作用于**后端确实会校验归属**的那几个动作（见 `ACTION_META.ownerOnly`），
+ *    必须与 Service 层的口径逐条对齐，不能凭感觉加：
+ *
+ *   | 动作            | 后端方法                                    | 校验归属？ |
+ *   |-----------------|---------------------------------------------|-----------|
+ *   | 编辑 edit       | `updateDraft`（`checkOwnership`）            | ✅ 是     |
+ *   | 提交初审 submit | `submitForAudit`（`checkOwnership`）         | ✅ 是     |
+ *   | 撤回 withdraw   | `changeStatusByAction(..., true)`            | ✅ 是     |
+ *   | 删除 remove     | `deleteArticle`（`checkOwnership`）          | ✅ 是     |
+ *   | 立即/排期发布   | `publishNow` / `publishSchedule`             | ❌ 否     |
+ *   | 重新发布        | 同 `publishNow`（撤回后的 PUBLISH_NOW）       | ❌ 否     |
+ *   | 下架 offline    | `changeStatusByAction(..., false)`           | ❌ 否     |
+ *   | 归档 archive    | `changeStatusByAction(..., false)`           | ❌ 否     |
+ *   | 审核 audit      | `audit`（只看权限码 + 禁止自审 11004）        | ❌ 否     |
+ *   | 查看 view       | 详情接口（只读，放开给所有有 view 的角色）    | ❌ 否     |
+ *
+ * 判据与后端一致：**"这个动作是作者对自己的内容负责，还是运营对全站内容负责"**。
+ * 主编要能下架/归档任何一篇（这正是该职能存在的意义），所以那两个**不能**加 ownerOnly。
+ *
+ * ⚠️ `currentUserId` 取不到时（未登录 / 用户信息还没加载完）**退化为不过滤**，
+ *    而不是把所有按钮都藏起来：宁可多显示一个会被后端拒的按钮，
+ *    也不要因为一个异步时序问题让用户看到一个空操作列（后者更难排查）。
  */
 
 /** 权限码常量：集中一处，避免字符串在各文件里手写拼错 */
@@ -89,19 +121,25 @@ export const PERM = {
   MANAGE: 'article:manage'
 }
 
-/** 动作 key → 展示信息。label 用动词开头，和弹窗标题对得上 */
+/**
+ * 动作 key → 展示信息。label 用动词开头，和弹窗标题对得上。
+ *
+ * `ownerOnly: true` = 该动作后端会做水平越权校验（`checkOwnership`），
+ * 因此只对"文章作者本人"显示。清单与理由见文件头第 3 节那张对照表，
+ * **与 `ArticleServiceImpl` 的调用点逐条对齐过**，不是凭感觉加的。
+ */
 export const ACTION_META = {
   view: { key: 'view', label: '查看', perm: PERM.VIEW },
-  edit: { key: 'edit', label: '编辑', perm: PERM.UPDATE },
-  submit: { key: 'submit', label: '提交初审', perm: PERM.SUBMIT },
+  edit: { key: 'edit', label: '编辑', perm: PERM.UPDATE, ownerOnly: true },
+  submit: { key: 'submit', label: '提交初审', perm: PERM.SUBMIT, ownerOnly: true },
   audit: { key: 'audit', label: '审核', perm: PERM.AUDIT },
   publishNow: { key: 'publishNow', label: '立即发布', perm: PERM.PUBLISH },
   publishSchedule: { key: 'publishSchedule', label: '排期发布', perm: PERM.PUBLISH },
   republish: { key: 'republish', label: '重新发布', perm: PERM.PUBLISH },
-  withdraw: { key: 'withdraw', label: '撤回', perm: PERM.WITHDRAW },
+  withdraw: { key: 'withdraw', label: '撤回', perm: PERM.WITHDRAW, ownerOnly: true },
   offline: { key: 'offline', label: '下架', perm: PERM.MANAGE, danger: true },
   archive: { key: 'archive', label: '归档', perm: PERM.MANAGE, danger: true },
-  remove: { key: 'remove', label: '删除', perm: PERM.DELETE, danger: true }
+  remove: { key: 'remove', label: '删除', perm: PERM.DELETE, danger: true, ownerOnly: true }
 }
 
 /**
@@ -129,19 +167,39 @@ const RULES = {
 /**
  * 计算某一行当前该显示哪些动作。
  *
- * @param {{status:number}} article 文章行（至少要有 status；其它字段用不到）
+ * 两个过滤维度（**都要过**，见文件头第 3 节）：
+ *   ① 权限码：`hasPermission(meta.perm)` —— 这个角色能不能做这类动作；
+ *   ② 归属：`meta.ownerOnly` 的动作只对文章作者本人显示 —— 这一行是不是他的。
+ *
+ * @param {{status:number, authorId?:number}} article 文章行（列表 VO 里带 authorId）
  * @param {(perm:string)=>boolean} hasPermission 权限判断函数，
  *        实际传 pinia 的 `userStore.hasPermission` —— 传函数进来而不是直接 import store，
  *        是为了这个文件保持纯函数、能在没有 pinia 的环境里被断言。
- * @returns {Array<{key:string,label:string,perm:string,danger?:boolean}>}
+ * @param {number|string|null} [currentUserId] 当前登录用户 id。
+ *        **不传 / 传 null 时退化为"不做归属过滤"**（宁可多显示一个会被后端拒的按钮，
+ *        也不要因为异步时序问题让用户看到一个空操作列）。
+ * @returns {Array<{key:string,label:string,perm:string,danger?:boolean,ownerOnly?:boolean}>}
  */
-export function getRowActions(article, hasPermission) {
+export function getRowActions(article, hasPermission, currentUserId) {
   const status = article == null ? null : Number(article.status)
   const keys = RULES[status]
   if (!keys) return []
 
   const check = typeof hasPermission === 'function' ? hasPermission : () => false
-  return keys.map((k) => ACTION_META[k]).filter((meta) => meta && check(meta.perm))
+  /** 拿不到当前用户 id 时不过滤归属（见 jsdoc 第 3 条） */
+  const canJudgeOwner = currentUserId !== null && currentUserId !== undefined && currentUserId !== ''
+  const mine = article != null && String(article.authorId) === String(currentUserId)
+
+  return keys
+    .map((k) => ACTION_META[k])
+    .filter((meta) => meta && check(meta.perm))
+    .filter((meta) => !meta.ownerOnly || !canJudgeOwner || mine)
+}
+
+/** 判断某一行是不是当前用户自己的稿子（供页面做"我的投稿"之外的提示用） */
+export function isOwnArticle(article, currentUserId) {
+  if (article == null || currentUserId === null || currentUserId === undefined) return false
+  return String(article.authorId) === String(currentUserId)
 }
 
 /**
