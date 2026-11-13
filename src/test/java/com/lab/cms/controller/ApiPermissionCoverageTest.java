@@ -70,7 +70,54 @@ public class ApiPermissionCoverageTest {
     private static final String ARTICLE_DOMAIN = "article:";
 
     /**
-     * 全项目"刻意不加 {@code @RequirePermission} 的接口"清单。
+     * 全项目所有 Controller。
+     *
+     * <p>⚠️ <b>S24 把这里从"写死的 4 个"改成了一个常量数组</b>，原因很实在：
+     * 原来两个测试里各写了一遍 {@code {ArticleController, AuthController,
+     * HealthController, SystemController}}，于是新增的
+     * {@code CategoryController / TagController / LogController / ReportController}
+     * <b>完全不在护栏覆盖范围内</b> —— 它们漏加 {@code @RequirePermission} 时测试照样绿。
+     *
+     * <p>这正是"护栏本身需要被护栏"的典型：一条用来防止新接口漏加权限注解的断言，
+     * 因为维护者（我）忘了把它新加的类登记进来，而对新代码静默失效。
+     * 合并成一个常量后，以后加控制器只需改这一处。
+     */
+    private static final Class<?>[] ALL_CONTROLLERS = {
+            ArticleController.class,
+            AuthController.class,
+            HealthController.class,
+            SystemController.class,
+            // ↓ S24 新增的四个域
+            CategoryController.class,
+            TagController.class,
+            LogController.class,
+            ReportController.class
+    };
+
+    /**
+     * 各业务域控制器 → 期望的权限码前缀。
+     *
+     * <p>⚠️ 这张表是"权限边界"的可执行表达：{@code CategoryController} 里的端点
+     * 只能要 {@code category:*} 的权限，不能出现 {@code article:*} 或 {@code log:*}。
+     * 一旦有人图省事把 {@code @RequirePermission("article:view")} 抄到分类接口上，
+     * 这里会立刻红 —— 否则那种错误在运行期的表现是"权限校验通过了但校验的是错的权限"，
+     * 多数情况下没人会发现。
+     *
+     * <p>⚠️ {@code SystemController} 与 {@code AuthController} 不在这张表里：
+     * 它们的端点全部在 {@link #EXEMPT_METHODS} 豁免清单中（探针 / 认证入口 / 主干自测），
+     * 本就不要求权限码，用"前缀匹配"去校验它们没有意义。
+     */
+    private static final java.util.Map<Class<?>, String> DOMAIN_PREFIX = new java.util.LinkedHashMap<>();
+
+    static {
+        DOMAIN_PREFIX.put(ArticleController.class, ARTICLE_DOMAIN);
+        DOMAIN_PREFIX.put(CategoryController.class, "category:");
+        DOMAIN_PREFIX.put(TagController.class, "category:");
+        DOMAIN_PREFIX.put(LogController.class, "log:");
+        DOMAIN_PREFIX.put(ReportController.class, "report:");
+    }
+
+    /** 全项目"刻意不加 {@code @RequirePermission} 的接口"清单。
      *
      * <p>格式 {@code 控制器简单类名#方法名}。每一条都写明为什么可以不加。
      * <p>⚠️ 这个清单<b>只允许因为上面三类理由增长</b>；业务接口一律不许进来。
@@ -94,6 +141,10 @@ public class ApiPermissionCoverageTest {
             "SystemController#health",
             "SystemController#selfTestOperLog",
             "SystemController#selfTestException"
+            // ⚠️ S24 新增的四个域一个都没进这个清单 —— 它们的每个端点都有权限码。
+            //    这正是本清单与 ALL_CONTROLLERS 必须同步维护的意义：
+            //    如果有人给新域加了端点又忘了加权限注解，它会出现在"实际无注解集合"里
+            //    而不在本清单里，testUnannotatedEndpointsEqualToExemptionList 立刻失败。
     ));
 
     /** 需要 Spring 上下文里的数据源来核对权限码（拼错注解不会报错，必须查库）。 */
@@ -264,13 +315,10 @@ public class ApiPermissionCoverageTest {
      */
     @Test
     public void testUnannotatedEndpointsEqualToExemptionList() {
-        Class<?>[] controllers = {ArticleController.class, AuthController.class,
-                HealthController.class, SystemController.class};
-
         Set<String> actuallyUnannotated = new TreeSet<>();
         Set<String> annotated = new TreeSet<>();
 
-        for (Class<?> clazz : controllers) {
+        for (Class<?> clazz : ALL_CONTROLLERS) {
             for (Method m : mappedMethods(clazz)) {
                 String key = clazz.getSimpleName() + "#" + m.getName();
                 if (m.isAnnotationPresent(RequirePermission.class)) {
@@ -306,9 +354,7 @@ public class ApiPermissionCoverageTest {
     @Test
     public void testExemptionListEntriesStillExist() {
         Set<String> allMapped = new TreeSet<>();
-        Class<?>[] controllers = {ArticleController.class, AuthController.class,
-                HealthController.class, SystemController.class};
-        for (Class<?> clazz : controllers) {
+        for (Class<?> clazz : ALL_CONTROLLERS) {
             for (Method m : mappedMethods(clazz)) {
                 allMapped.add(clazz.getSimpleName() + "#" + m.getName());
             }
@@ -379,5 +425,92 @@ public class ApiPermissionCoverageTest {
         // ★ S20 收紧：9 个码必须全部落到端点上，一个都不许剩
         assertEquals("文章域权限码应全部被接口使用（有码无接口说明契约里的端点还没做）",
                 expectedArticleDomain, used);
+    }
+
+    // ==================== 4. 全业务域：权限码域内 + 写记日志读不记（S24 新增） ====================
+
+    /**
+     * 把 S12 在文章域立的两条规则（<b>权限码必须存在且不跨域</b>、
+     * <b>写接口记日志 / 读接口不记</b>）推广到 S24 新增的四个域。
+     *
+     * <h3>为什么必须在 S24 补这条</h3>
+     * <p>S12 的两条断言都<b>只遍历 {@code ArticleController}</b>。
+     * 于是新增的分类 / 标签 / 日志 / 报表四个控制器处在"没人管"的状态：
+     * 漏加 {@code @RequirePermission}、把 {@code category:manage} 写成
+     * {@code article:manage}、给 GET 加上 {@code @OperLog}…… 这些错都<b>不会</b>
+     * 让既有测试变红。而它们的后果分别是：接口对所有人开放 /
+     * 权限边界形同虚设 / 日志表被查询刷爆。
+     *
+     * <h3>三件事一起断言</h3>
+     * <ol>
+     *   <li>每个端点都有 {@code @RequirePermission}（业务域零豁免）；</li>
+     *   <li>权限码<b>真实存在于 {@code sys_permission}</b>
+     *       （拼错不会报错，只会让所有角色都缺权限、连 admin 都被 403）；</li>
+     *   <li>权限码<b>落在本域的段位内</b>（{@code category:} / {@code log:}
+     *       / {@code report:}），防止抄代码时抄出一个跨域权限码。</li>
+     * </ol>
+     *
+     * <p>再叠加读写的 {@code @OperLog} 双向断言 —— 与文章域的那条口径完全一致。
+     */
+    @Test
+    public void testEveryBusinessEndpointHasDomainPermissionAndCorrectOperLog() {
+        Set<String> codesInDb = permissionCodesInDb();
+        assertFalse("sys_permission 表里一条权限码都没有，环境不对", codesInDb.isEmpty());
+
+        int writeCount = 0;
+        int readCount = 0;
+        StringBuilder inventory = new StringBuilder();
+
+        for (java.util.Map.Entry<Class<?>, String> entry : DOMAIN_PREFIX.entrySet()) {
+            Class<?> clazz = entry.getKey();
+            String prefix = entry.getValue();
+            List<Method> methods = mappedMethods(clazz);
+            assertFalse(clazz.getSimpleName() + " 里一个接口都没反射到，测试本身有问题",
+                    methods.isEmpty());
+
+            for (Method m : methods) {
+                RequirePermission rp = m.getAnnotation(RequirePermission.class);
+                assertNotNull("⚠️ " + clazz.getSimpleName() + "#" + m.getName()
+                        + " 没有 @RequirePermission —— 业务域不允许有豁免接口", rp);
+                assertTrue("@" + m.getName() + " 的权限码数组为空", rp.value().length > 0);
+
+                for (String code : rp.value()) {
+                    assertFalse(m.getName() + " 的权限码是空白串",
+                            code == null || code.trim().isEmpty());
+                    assertTrue("⚠️ " + m.getName() + " 用了库里不存在的权限码「" + code
+                                    + "」—— 库表实际有：" + new TreeSet<>(codesInDb),
+                            codesInDb.contains(code));
+                    assertTrue("⚠️ " + m.getName() + " 的权限码「" + code + "」不在 " + prefix
+                                    + " 域内 —— 跨域用权限码会让权限边界失效（抄代码时最容易犯）",
+                            code.startsWith(prefix));
+                }
+
+                boolean write = isWrite(m);
+                boolean hasOperLog = m.isAnnotationPresent(OperLog.class);
+                if (write) {
+                    writeCount++;
+                    assertTrue("⚠️ 写接口 " + m.getName() + " 没有 @OperLog —— 谁改了数据将无法追责",
+                            hasOperLog);
+                    OperLog ol = m.getAnnotation(OperLog.class);
+                    assertNotNull(ol);
+                    assertFalse("写接口 " + m.getName() + " 的 @OperLog.module 为空",
+                            ol.module() == null || ol.module().trim().isEmpty());
+                    assertNotNull(m.getName() + " 的 @OperLog.type 为空", ol.type());
+                } else {
+                    readCount++;
+                    assertFalse("⚠️ 读接口 " + m.getName() + " 不该有 @OperLog —— "
+                                    + "查询日志类接口若记日志会形成自我放大",
+                            hasOperLog);
+                }
+                inventory.append(String.format("  %-6s %-22s → %s%n",
+                        verb(m), m.getName(), Arrays.toString(rp.value())));
+            }
+        }
+
+        assertTrue("写接口一个都没反射到，测试本身有问题", writeCount >= 10);
+        assertTrue("读接口一个都没反射到，测试本身有问题", readCount >= 8);
+        System.out.println("[S24] 全业务域接口清单（写 " + writeCount + " 个带 @OperLog，读 "
+                + readCount + " 个不带）：");
+        System.out.print(inventory);
     }
 }
